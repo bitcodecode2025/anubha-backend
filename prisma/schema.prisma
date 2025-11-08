@@ -10,15 +10,14 @@ datasource db {
 /**
  * ---------- ENUMS ----------
  */
-
 enum Role {
   USER
   ADMIN
 }
 
 enum AppointmentStatus {
-  PENDING // form filled but payment not done
-  CONFIRMED // payment successful
+  PENDING
+  CONFIRMED
   CANCELLED
   COMPLETED
 }
@@ -35,6 +34,29 @@ enum StorageProvider {
   LOCAL
 }
 
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum SleepQuality {
+  SOUND
+  DISTURBED
+}
+
+enum FoodPreference {
+  VEG
+  NON_VEG
+  EGG_VEG
+}
+
+enum BowelMovement {
+  NORMAL
+  CONSTIPATION
+  DIARRHEA
+  IRREGULAR
+}
+
 /**
  * ---------- MODELS ----------
  */
@@ -44,8 +66,8 @@ model User {
   name         String
   phone        String        @unique
   role         Role          @default(USER)
-  appointments Appointment[] @relation("UserAppointments")
-  forms        UserForm[]
+  patients     Patient[]
+  appointments Appointment[]
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 }
@@ -57,8 +79,8 @@ model Doctor {
   specialization String?
   bio            String?
   clinicAddress  String?
-  appointments   Appointment[] @relation("DoctorAppointments")
   slots          Slot[]
+  appointments   Appointment[]
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 }
@@ -70,6 +92,65 @@ model Admin {
   password  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+/**
+ * ---------- PATIENT ----------
+ * Unified model — includes all details & recall (meal) data
+ */
+
+model Patient {
+  id     String @id @default(uuid())
+  user   User   @relation(fields: [userId], references: [id])
+  userId String
+  name   String
+
+  // Basic Info
+  age    Int
+  gender Gender
+
+  // Body Measurements
+  weight Float
+  height Float
+  neck   Float
+  waist  Float
+  hip    Float
+
+  // Lifestyle
+  wakeUpTime       String
+  sleepTime        String
+  sleepQuality     SleepQuality
+  dailyWaterIntake Int
+
+  // Medical Info
+  medicalHistory String?
+
+  // Food Habits
+  foodPreference FoodPreference
+  allergy        String?
+
+  // Digestive Health
+  bowelMovement BowelMovement
+
+  // Recall Form / Meal Entries
+  postWakeUpTime String?
+  postWakeUpMeal String?
+  breakfastTime  String?
+  breakfastMeal  String?
+  midMealTime    String?
+  midMealMeal    String?
+  lunchTime      String?
+  lunchMeal      String?
+  midEveningTime String?
+  midEveningMeal String?
+  dinnerTime     String?
+  dinnerMeal     String?
+
+  // Relations
+  appointments Appointment[]
+  files        File[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 }
 
 /**
@@ -92,42 +173,34 @@ model Slot {
 }
 
 model Appointment {
-  id       String            @id @default(uuid())
-  service  ServiceType
-  startAt  DateTime
-  endAt    DateTime
-  status   AppointmentStatus @default(PENDING)
-  user     User              @relation(fields: [userId], references: [id], name: "UserAppointments")
-  userId   String
-  doctor   Doctor            @relation(fields: [doctorId], references: [id], name: "DoctorAppointments")
-  doctorId String
-  slot     Slot?             @relation(fields: [slotId], references: [id])
-  slotId   String?           @unique // one-to-one, each appointment linked to one slot
-
-  form         UserForm?
+  id           String            @id @default(uuid())
+  service      ServiceType
+  startAt      DateTime
+  endAt        DateTime
+  status       AppointmentStatus @default(PENDING)
+  user         User              @relation(fields: [userId], references: [id])
+  userId       String
+  doctor       Doctor            @relation(fields: [doctorId], references: [id])
+  doctorId     String
+  patient      Patient           @relation(fields: [patientId], references: [id])
+  patientId    String
+  slot         Slot?             @relation(fields: [slotId], references: [id])
+  slotId       String?           @unique
   paymentId    String?
   amount       Int?
   meetingUrl   String?
-  reminderSent Boolean   @default(false)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  notes        String?
+  reminderSent Boolean           @default(false)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
 
   @@index([startAt])
   @@index([doctorId, startAt])
 }
 
-model UserForm {
-  id            String       @id @default(uuid())
-  user          User         @relation(fields: [userId], references: [id])
-  userId        String
-  slotId        String? // link to selected slot before payment
-  formData      Json
-  files         File[]
-  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
-  appointmentId String?      @unique
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-}
+/**
+ * ---------- FILE UPLOADS ----------
+ */
 
 model File {
   id          String          @id @default(uuid())
@@ -136,8 +209,8 @@ model File {
   mimeType    String
   sizeInBytes Int
   provider    StorageProvider @default(CLOUDINARY)
-  userForm    UserForm        @relation(fields: [userFormId], references: [id])
-  userFormId  String
+  patient     Patient         @relation(fields: [patientId], references: [id])
+  patientId   String
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
 }

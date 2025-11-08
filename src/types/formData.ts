@@ -14,10 +14,8 @@ export interface PatientRecallForm {
 
 export interface FormDataInput {
   // Basic Info
-  name: string;
   age: number;
   gender: "male" | "female";
-
   // Body Measurements
   weight: number;
   height: number;
