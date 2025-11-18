@@ -61,16 +61,42 @@ enum BowelMovement {
  * ---------- MODELS ----------
  */
 
+
 model User {
   id           String        @id @default(uuid())
   name         String
-  phone        String        @unique
-  role         Role          @default(USER)
-  patients     Patient[]
-  appointments Appointment[]
+  email         String       @unique
+  // phone        String        @unique
+  role          Role         @default(USER)
+  patients      PatientDetials[]
+  appointments  Appointment[]
+  refreshTokens RefreshToken[] 
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 }
+
+model OTP {
+  id        String   @id @default(uuid())
+  email     String
+  code      String          // hashed OTP
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique   // hashed refresh token
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
 
 model Doctor {
   id             String        @id @default(uuid())
@@ -99,7 +125,7 @@ model Admin {
  * Unified model — includes all details & recall (meal) data
  */
 
-model Patient {
+model PatientDetials {
   id     String @id @default(uuid())
   user   User   @relation(fields: [userId], references: [id])
   userId String
@@ -182,7 +208,7 @@ model Appointment {
   userId       String
   doctor       Doctor            @relation(fields: [doctorId], references: [id])
   doctorId     String
-  patient      Patient           @relation(fields: [patientId], references: [id])
+  patient      PatientDetials           @relation(fields: [patientId], references: [id])
   patientId    String
   slot         Slot?             @relation(fields: [slotId], references: [id])
   slotId       String?           @unique
@@ -209,7 +235,7 @@ model File {
   mimeType    String
   sizeInBytes Int
   provider    StorageProvider @default(CLOUDINARY)
-  patient     Patient         @relation(fields: [patientId], references: [id])
+  patient     PatientDetials         @relation(fields: [patientId], references: [id])
   patientId   String
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt

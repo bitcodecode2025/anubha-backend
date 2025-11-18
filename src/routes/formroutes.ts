@@ -1,8 +1,8 @@
-import { Router } from "express";
-import { createUserForm } from "../controllers/formcontroller";
+// import { Router } from "express";
+// import { createUserForm } from "../controllers/formcontroller";
 
-const formroutes = Router();
+// const formroutes = Router();
 
-formroutes.post("/", createUserForm);
+// formroutes.post("/", createUserForm);
 
-export default formroutes;
+// export default formroutes;
