@@ -1,31 +1,32 @@
-// import multer from "multer";
+import multer from "multer";
 
-// const ALLOWED_IMAGE_TYPES = ["image/jpg", "image/jpeg", "image/png"];
+const storage = multer.memoryStorage();
 
-// // Configure Multer for in-memory storage (no temp files)
-// const storage = multer.memoryStorage();
+const fileFilter = (
+  req: Express.Request,
+  file: Express.Multer.File,
+  cb: multer.FileFilterCallback
+) => {
+  if (!file.mimetype.startsWith("image/")) {
+    const error = new Error("Only image files are allowed!");
+    error.name = "MulterFileTypeError";
+    return cb(error);
+  }
 
-// // File filter – only allow JPG, JPEG, PNG
-// const fileFilter = (
-//   req: Express.Request,
-//   file: Express.Multer.File,
-//   cb: multer.FileFilterCallback
-// ) => {
-//   if (!ALLOWED_IMAGE_TYPES.includes(file.mimetype)) {
-//     const error = new Error("Only JPG, JPEG, and PNG files are allowed!");
-//     error.name = "MulterFileTypeError";
-//     return cb(error);
-//   }
-//   cb(null, true);
-// };
+  if (file.size === 0) {
+    const error = new Error("Uploaded file is empty");
+    return cb(error);
+  }
 
-// // 10MB limit for images
-// const limits = { fileSize: 10 * 1024 * 1024 };
+  cb(null, true);
+};
 
-// const imageUpload = multer({
-//   storage,
-//   fileFilter,
-//   limits,
-// });
+const limits = { fileSize: 10 * 1024 * 1024 }; // 10MB
 
-// export default imageUpload;
+const imageUpload = multer({
+  storage,
+  fileFilter,
+  limits,
+});
+
+export default imageUpload;

@@ -37,11 +37,14 @@ enum StorageProvider {
 enum Gender {
   MALE
   FEMALE
+  OTHER
 }
 
 enum SleepQuality {
-  SOUND
+  NORMAL
+  IRREGULAR
   DISTURBED
+  INSOMNIA
 }
 
 enum FoodPreference {
@@ -116,71 +119,43 @@ model Admin {
  * Unified model — includes all details & recall (meal) data
  */
 
-
-model Doctor {
-  id             String        @id @default(uuid())
-  name           String
-  phone          String?       @unique
-  specialization String?
-  bio            String?
-  clinicAddress  String?
-  slots          Slot[]
-  appointments   Appointment[]
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-}
 model PatientDetials {
   id     String @id @default(uuid())
   user   User   @relation(fields: [userId], references: [id])
   userId String
-  name   String
+  /*** Step 1 — Personal Details ***/
+  name         String
+  phone        String
+  gender       Gender
+  email        String
+  dateOfBirth  DateTime
+  age          Int
+  address      String
 
-  // Basic Info
-  age    Int
-  gender Gender
-
-  // Body Measurements
+  /*** Step 2 — Body Measurements ***/
   weight Float
   height Float
   neck   Float
   waist  Float
   hip    Float
 
-  // Lifestyle
-  wakeUpTime       String
-  sleepTime        String
-  sleepQuality     SleepQuality
-  dailyWaterIntake Int
+  /*** Step 3 — Medical & Reports ***/
+  medicalHistory      String?
+  appointmentConcerns String?
+  files               File[]
 
-  // Medical Info
-  medicalHistory String?
+  /*** Step 4 — Lifestyle & Habits ***/
+  bowelMovement     BowelMovement
+  dailyFoodIntake   String?
+  dailyWaterIntake  Int
+  wakeUpTime        String
+  sleepTime         String
+  sleepQuality      SleepQuality
 
-  // Food Habits
-  foodPreference FoodPreference
-  allergy        String?
-
-  // Digestive Health
-  bowelMovement BowelMovement
-
-  // Recall Form / Meal Entries
-  postWakeUpTime String?
-  postWakeUpMeal String?
-  breakfastTime  String?
-  breakfastMeal  String?
-  midMealTime    String?
-  midMealMeal    String?
-  lunchTime      String?
-  lunchMeal      String?
-  midEveningTime String?
-  midEveningMeal String?
-  dinnerTime     String?
-  dinnerMeal     String?
-
-  // Relations
+  /*** Relations ***/
   appointments Appointment[]
-  files        File[]
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 /**
@@ -235,12 +210,27 @@ model Appointment {
 model File {
   id          String          @id @default(uuid())
   url         String
+  publicId    String 
   fileName    String
   mimeType    String
   sizeInBytes Int
   provider    StorageProvider @default(CLOUDINARY)
-  patient     PatientDetials         @relation(fields: [patientId], references: [id])
-  patientId   String
+  patient     PatientDetials?         @relation(fields: [patientId], references: [id])
+  patientId   String?
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
+}
+
+
+model Doctor {
+  id             String        @id @default(uuid())
+  name           String
+  phone          String?       @unique
+  specialization String?
+  bio            String?
+  clinicAddress  String?
+  slots          Slot[]
+  appointments   Appointment[]
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 }

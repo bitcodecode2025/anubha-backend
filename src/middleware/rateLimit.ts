@@ -10,3 +10,14 @@ export const otpLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+export const patientLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 5, // allow 5 patient form submissions per minute
+  message: {
+    success: false,
+    message: "Too many patient submissions. Please wait a moment.",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});

@@ -1,56 +1,64 @@
-// import { Request, Response } from "express";
-// import cloudinary from "../util/cloudinary";
+import { Request, Response } from "express";
+import cloudinary from "../util/cloudinary";
+import prisma from "../database/prismaclient";
 
-// export const uploadImageToCloudinary = async (req: Request, res: Response) => {
-//   try {
-//     const file = req.file;
-//     if (!file) {
-//       return res.status(400).json({ error: "No file uploaded." });
-//     }
+export const uploadImageToCloudinary = async (req: Request, res: Response) => {
+  try {
+    const files = req.files as Express.Multer.File[];
 
-//     // Convert file buffer to Base64 for Cloudinary
-//     const fileBase64 = `data:${file.mimetype};base64,${file.buffer.toString(
-//       "base64"
-//     )}`;
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: "No files uploaded." });
+    }
 
-//     // Upload to Cloudinary (optimized)
-//     const uploadResult = await cloudinary.uploader.upload(fileBase64, {
-//       folder: "nutriwell_images",
-//       resource_type: "image",
-//       transformation: [
-//         {
-//           quality: "auto:best", // ✅ automatically picks best compression
-//           fetch_format: "auto", // ✅ delivers WebP/AVIF for browsers
-//           crop: "limit", // ✅ limits resize without cutting content
-//           width: 2000, // ✅ max width for high-quality display
-//           height: 2000, // ✅ prevents oversized uploads
-//         },
-//       ],
-//     });
+    const uploadedFiles = [];
 
-//     // Build response
-//     const response = {
-//       url: uploadResult.secure_url,
-//       publicId: uploadResult.public_id,
-//       fileName: file.originalname,
-//       mimeType: file.mimetype,
-//       sizeInBytes: file.size,
-//     };
+    for (const file of files) {
+      const base64 = `data:${file.mimetype};base64,${file.buffer.toString(
+        "base64"
+      )}`;
 
-//     res.status(200).json({
-//       message: "Image uploaded successfully ✅",
-//       file: response,
-//     });
-//   } catch (error: any) {
-//     console.error("Cloudinary upload error:", error);
+      const result = await cloudinary.uploader.upload(base64, {
+        folder: "nutriwell_images",
+        resource_type: "image",
+        transformation: [
+          {
+            quality: "auto:best",
+            fetch_format: "auto",
+            crop: "limit",
+            width: 2000,
+            height: 2000,
+          },
+        ],
+      });
 
-//     // Optional: handle Multer file size limit error
-//     if (error.code === "LIMIT_FILE_SIZE") {
-//       return res
-//         .status(400)
-//         .json({ error: "File too large. Max size is 10MB." });
-//     }
+      // Save to DB with patientId = null
+      const saved = await prisma.file.create({
+        data: {
+          url: result.secure_url,
+          publicId: result.public_id,
+          fileName: file.originalname,
+          mimeType: file.mimetype,
+          sizeInBytes: file.size,
+          patientId: null, // 🟢 CORRECT
+        },
+      });
 
-//     res.status(500).json({ error: "Image upload failed" });
-//   }
-// };
+      uploadedFiles.push(saved); // includes saved.id
+    }
+
+    res.status(200).json({
+      message: "Images uploaded successfully ✅",
+      files: uploadedFiles,
+    });
+  } catch (error: any) {
+    console.error("Cloudinary upload error:", error);
+
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res
+        .status(400)
+        .json({ error: "File too large. Max size is 10MB." });
+    }
+
+    res.status(500).json({ error: "Image upload failed" });
+  }
+};

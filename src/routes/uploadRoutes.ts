@@ -1,13 +1,13 @@
-// import { Router } from "express";
-// import imageUpload from "../middleware/multerConfig";
-// import { uploadImageToCloudinary } from "../controllers/uploadController";
+import { Router } from "express";
+import imageUpload from "../middleware/multerConfig";
+import { uploadImageToCloudinary } from "../controllers/uploadController";
 
-// const uploadRoutes = Router();
+const uploadRoutes = Router();
 
-// uploadRoutes.post(
-//   "/image",
-//   imageUpload.single("file"),
-//   uploadImageToCloudinary
-// );
+uploadRoutes.post(
+  "/image",
+  imageUpload.array("files", 10),
+  uploadImageToCloudinary
+);
 
-// export default uploadRoutes;
+export default uploadRoutes;
