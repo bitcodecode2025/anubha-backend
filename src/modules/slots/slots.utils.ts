@@ -1,4 +1,3 @@
-// src/modules/slots/slot.utils.ts
 import {
   OFFLINE_SLOT_TEMPLATES,
   ONLINE_SLOT_TEMPLATES,

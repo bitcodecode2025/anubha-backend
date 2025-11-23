@@ -8,6 +8,7 @@ import authRoutes from "./modules/auth/auth.routes";
 import patientRoutes from "./modules/patient/patient.routes";
 import { attachUser } from "./middleware/attachUser";
 import slotRoutes from "./modules/slots/slots.routes";
+import appointmentRoutes from "./modules/appointment/appointment.routes";
 
 dotenv.config();
 
@@ -30,11 +31,12 @@ app.get("/public", (req, res) => {
 });
 
 //routes
-app.use("/auth", authRoutes);
-app.use("/patients", patientRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/patients", patientRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use(multerErrorHandler);
 app.use("/api/slots", slotRoutes);
+app.use("/api/appointments", appointmentRoutes);
 
 //_________________________________________________________________________________________
 app.get("/", (_req: Request, res: Response) => {
