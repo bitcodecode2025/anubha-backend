@@ -6,9 +6,8 @@ import uploadRoutes from "./routes/uploadRoutes";
 import { multerErrorHandler } from "./middleware/multerErrorhandler";
 import authRoutes from "./modules/auth/auth.routes";
 import patientRoutes from "./modules/patient/patient.routes";
-import { requireAuth } from "./middleware/requireAuth";
-import { requireRole } from "./middleware/requiredRole";
 import { attachUser } from "./middleware/attachUser";
+import slotRoutes from "./modules/slots/slots.routes";
 
 dotenv.config();
 
@@ -35,6 +34,7 @@ app.use("/auth", authRoutes);
 app.use("/patients", patientRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use(multerErrorHandler);
+app.use("/api/slots", slotRoutes);
 
 //_________________________________________________________________________________________
 app.get("/", (_req: Request, res: Response) => {
