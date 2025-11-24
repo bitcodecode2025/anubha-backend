@@ -292,3 +292,8 @@ model DoctorDayOff {
   @@unique([adminId, date])
   @@index([date])
 }
+model WebhookEvent {
+  id        String   @id @default(uuid())
+  eventId   String   @unique
+  createdAt DateTime @default(now())
+}

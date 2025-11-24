@@ -9,6 +9,9 @@ import patientRoutes from "./modules/patient/patient.routes";
 import { attachUser } from "./middleware/attachUser";
 import slotRoutes from "./modules/slots/slots.routes";
 import appointmentRoutes from "./modules/appointment/appointment.routes";
+import rawBodyMiddleware from "./middleware/rawBody";
+import { razorpayWebhookHandler } from "./modules/payment/payment.controller";
+import paymentRoutes from "./modules/payment/payment.routes";
 
 dotenv.config();
 
@@ -17,6 +20,8 @@ const app = express();
 app.use(cookieParser());
 
 app.use(attachUser);
+
+app.post("/api/payment/webhook", rawBodyMiddleware, razorpayWebhookHandler);
 
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -37,11 +42,7 @@ app.use("/api/upload", uploadRoutes);
 app.use(multerErrorHandler);
 app.use("/api/slots", slotRoutes);
 app.use("/api/appointments", appointmentRoutes);
-
-//_________________________________________________________________________________________
-app.get("/", (_req: Request, res: Response) => {
-  res.send("Nutriwell backend (TypeScript) running ✅");
-});
+app.use("/api/payment", paymentRoutes);
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () =>
