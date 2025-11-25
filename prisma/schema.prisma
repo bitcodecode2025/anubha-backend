@@ -71,6 +71,18 @@ enum MealType {
   OTHER
 }
 
+enum DoctorFieldType {
+  TEXT
+  NUMBER
+  SELECT
+  MULTISELECT
+  RADIO
+  BOOLEAN
+  DATE
+  TIME
+  TEXTAREA
+}
+
 /**
  * ---------------------------
  * AUTH / CORE MODELS
@@ -123,8 +135,9 @@ model Admin {
   appointments  Appointment[]  @relation("DoctorAppointments")
   refreshTokens RefreshToken[]
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  DoctorFormSession DoctorFormSession[]
 }
 
 /**
@@ -162,10 +175,11 @@ model PatientDetials {
   sleepTime        String
   sleepQuality     SleepQuality
 
-  recalls      Recall[]      @relation("PatientRecalls")
-  appointments Appointment[]
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  recalls           Recall[]            @relation("PatientRecalls")
+  appointments      Appointment[]
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  DoctorFormSession DoctorFormSession[]
 }
 
 model Recall {
@@ -271,9 +285,10 @@ model Appointment {
   planPackageName String?
   mode            AppointmentMode
 
-  recall    Recall?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  recall            Recall?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  DoctorFormSession DoctorFormSession[]
 
   @@index([startAt])
   @@index([doctorId, startAt])
@@ -292,8 +307,110 @@ model DoctorDayOff {
   @@unique([adminId, date])
   @@index([date])
 }
+
 model WebhookEvent {
   id        String   @id @default(uuid())
   eventId   String   @unique
   createdAt DateTime @default(now())
 }
+
+model DoctorFieldGroup {
+  id        String              @id @default(uuid())
+  key       String              @unique // eg "personal", "sleep", "meals", "medical"
+  title     String
+  order     Int                 @default(0)
+  fields    DoctorFieldMaster[]
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+}
+
+model DoctorFieldMaster {
+  id          String            @id @default(uuid())
+  key         String            @unique // machine key e.g., "alcohol_consumption"
+  label       String // UI label
+  description String?
+  type        DoctorFieldType
+  placeholder String?
+  required    Boolean           @default(false)
+  group       DoctorFieldGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  groupId     String?
+  order       Int               @default(0)
+
+  // SELECT / MULTISELECT / RADIO -> options here
+  options DoctorFieldOption[]
+
+  active Boolean @default(true)
+
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  DoctorFormFieldValue DoctorFormFieldValue[]
+
+  @@index([key])
+  @@index([groupId, order])
+}
+
+model DoctorFieldOption {
+  id        String            @id @default(uuid())
+  field     DoctorFieldMaster @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  fieldId   String
+  value     String // stored value
+  label     String // display label
+  order     Int               @default(0)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@unique([fieldId, value])
+  @@index([fieldId])
+}
+
+/**
+ * One doctor form session (created when admin clicks + for a patient/appointment)
+ */
+model DoctorFormSession {
+  id String @id @default(uuid())
+
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  appointmentId String?
+
+  patient   PatientDetials @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientId String
+
+  doctor   Admin  @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  doctorId String
+
+  title     String? // e.g., "Initial assessment"
+  notes     String? // free text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  values DoctorFormFieldValue[]
+
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model DoctorFormFieldValue {
+  id        String            @id @default(uuid())
+  session   DoctorFormSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId String
+
+  field   DoctorFieldMaster @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  fieldId String
+
+  // typed values
+  stringValue  String?
+  numberValue  Float?
+  booleanValue Boolean?
+  dateValue    DateTime?
+  timeValue    String?
+  jsonValue    Json? // for multi-select or structured data
+
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([sessionId])
+  @@index([fieldId])
+}
+
+

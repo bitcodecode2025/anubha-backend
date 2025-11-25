@@ -175,68 +175,68 @@ export async function adminUpdateAppointmentStatus(
   }
 }
 
-export async function adminGetAppointments(req: Request, res: Response) {
-  try {
-    const { date, status, mode, page = 1, limit = 20 } = req.query;
+// export async function adminGetAppointments(req: Request, res: Response) {
+//   try {
+//     const { date, status, mode, page = 1, limit = 20 } = req.query;
 
-    const filters: any = {};
+//     const filters: any = {};
 
-    // Filter by exact date
-    if (date) {
-      const day = new Date(date as string);
-      const nextDay = new Date(day);
-      nextDay.setDate(day.getDate() + 1);
+//     // Filter by exact date
+//     if (date) {
+//       const day = new Date(date as string);
+//       const nextDay = new Date(day);
+//       nextDay.setDate(day.getDate() + 1);
 
-      filters.startAt = {
-        gte: day,
-        lt: nextDay,
-      };
-    }
+//       filters.startAt = {
+//         gte: day,
+//         lt: nextDay,
+//       };
+//     }
 
-    // Filter by status
-    if (status) {
-      filters.status = status as AppointmentStatus;
-    }
+//     // Filter by status
+//     if (status) {
+//       filters.status = status as AppointmentStatus;
+//     }
 
-    // Filter by mode
-    if (mode) {
-      filters.mode = mode as AppointmentMode;
-    }
+//     // Filter by mode
+//     if (mode) {
+//       filters.mode = mode as AppointmentMode;
+//     }
 
-    const skip = (Number(page) - 1) * Number(limit);
+//     const skip = (Number(page) - 1) * Number(limit);
 
-    const [appointments, total] = await Promise.all([
-      prisma.appointment.findMany({
-        where: filters,
-        orderBy: { startAt: "asc" },
-        skip,
-        take: Number(limit),
-        include: {
-          patient: {
-            select: {
-              name: true,
-              phone: true,
-              email: true,
-            },
-          },
-          slot: true,
-        },
-      }),
+//     const [appointments, total] = await Promise.all([
+//       prisma.appointment.findMany({
+//         where: filters,
+//         orderBy: { startAt: "asc" },
+//         skip,
+//         take: Number(limit),
+//         include: {
+//           patient: {
+//             select: {
+//               name: true,
+//               phone: true,
+//               email: true,
+//             },
+//           },
+//           slot: true,
+//         },
+//       }),
 
-      prisma.appointment.count({ where: filters }),
-    ]);
+//       prisma.appointment.count({ where: filters }),
+//     ]);
 
-    return res.json({
-      success: true,
-      total,
-      page: Number(page),
-      limit: Number(limit),
-      appointments,
-    });
-  } catch (err) {
-    console.error("Admin Get Appointments Error:", err);
-    return res
-      .status(500)
-      .json({ success: false, message: "Something went wrong" });
-  }
-}
+//     return res.json({
+//       success: true,
+//       total,
+//       page: Number(page),
+//       limit: Number(limit),
+//       appointments,
+//     });
+//   } catch (err) {
+//     console.error("Admin Get Appointments Error:", err);
+//     return res
+//       .status(500)
+//       .json({ success: false, message: "Something went wrong" });
+//   }
+// }
