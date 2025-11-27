@@ -5,7 +5,7 @@ export const otpLimiter = rateLimit({
   max: 5, // Max 5 OTP requests per window
   message: {
     success: false,
-    message: "Too many OTP requests. Try again later.",
+    message: "Too many OTP requests. Please wait a moment.",
   },
   standardHeaders: true,
   legacyHeaders: false,
