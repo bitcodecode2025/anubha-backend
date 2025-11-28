@@ -26,7 +26,11 @@ app.post("/api/payment/webhook", rawBodyMiddleware, razorpayWebhookHandler);
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-const allowedOrigins = ["http://localhost:3000", "http://192.168.29.116:3000"];
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://192.168.29.116:3000",
+  " http://192.168.0.105:3000",
+];
 
 app.use(
   cors({

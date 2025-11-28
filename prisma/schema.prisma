@@ -60,6 +60,7 @@ enum BowelMovement {
   DIARRHEA
   IRREGULAR
 }
+ 
 
 enum MealType {
   PRE_WAKEUP
@@ -171,6 +172,8 @@ model PatientDetials {
   files               File[]
 
   bowelMovement    BowelMovement
+  foodPreference   FoodPreference
+  allergic         String?
   dailyFoodIntake  String?
   dailyWaterIntake Int
   wakeUpTime       String
