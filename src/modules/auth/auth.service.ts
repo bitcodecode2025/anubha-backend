@@ -77,11 +77,18 @@ export class AuthService {
       data: { name, phone },
     });
 
+    const safeUser = {
+      id: user.id,
+      name: user.name,
+      phone: user.phone,
+      role: "USER" as const,
+    };
+
     const token = generateToken(user.id, "USER");
 
     return {
       message: "User registered successfully.",
-      user,
+      user: safeUser,
       token,
     };
   }
@@ -132,6 +139,7 @@ export class AuthService {
       message: "Logged in successfully.",
       role: owner.role,
       owner,
+      user: owner,
       token,
     };
   }

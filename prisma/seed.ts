@@ -1381,6 +1381,13 @@ async function upsertFieldAndOptions(
   return upserted;
 }
 
+const normalizePhone = (phone: string) => {
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length === 10) return `91${digits}`;
+  if (digits.length === 12) return digits;
+  throw new Error(`Invalid phone number provided for seeding: ${phone}`);
+};
+
 async function main() {
   try {
     console.log("Starting seed: Creating groups...");
@@ -1393,12 +1400,38 @@ async function main() {
       await upsertFieldAndOptions(f, groupMap);
     }
 
+    const ADMIN_RAW_PHONE = "6260440241";
+    const ADMIN_PHONE = normalizePhone(ADMIN_RAW_PHONE);
+    const ADMIN_EMAIL = "superadmin.tanishk@nutriwell.com";
+    const ADMIN_NAME = "super admin tanishk";
+
+    console.log("Ensuring default admin exists...");
+    await prisma.admin.updateMany({
+      where: { phone: { in: [ADMIN_RAW_PHONE, `+${ADMIN_PHONE}`] } },
+      data: { phone: ADMIN_PHONE },
+    });
+
+    await prisma.admin.upsert({
+      where: { phone: ADMIN_PHONE },
+      update: {
+        name: ADMIN_NAME,
+        email: ADMIN_EMAIL,
+        updatedAt: new Date(),
+      },
+      create: {
+        name: ADMIN_NAME,
+        phone: ADMIN_PHONE,
+        email: ADMIN_EMAIL,
+      },
+    });
+
     // Summary
     const totalGroups = await prisma.doctorFieldGroup.count();
     const totalFields = await prisma.doctorFieldMaster.count();
     const totalOptions = await prisma.doctorFieldOption.count();
+    const totalAdmins = await prisma.admin.count();
     console.log("Seeding finished.");
-    console.log({ totalGroups, totalFields, totalOptions });
+    console.log({ totalGroups, totalFields, totalOptions, totalAdmins });
   } catch (err) {
     console.error("Seed error:", err);
     process.exit(1);

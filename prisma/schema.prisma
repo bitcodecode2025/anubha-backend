@@ -279,6 +279,7 @@ model Appointment {
   slotId String? @unique
 
   paymentId               String?
+  paymentStatus           String @default("PENDING")
   amount                  Int?
   notes                   String?
   reminderSent            Boolean @default(false)
