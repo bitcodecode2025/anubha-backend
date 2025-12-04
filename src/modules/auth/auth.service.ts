@@ -5,15 +5,66 @@ import { generateToken } from "./utils/token";
 import { AppError } from "../../util/Apperror";
 
 export class AuthService {
+  /**
+   * Normalize phone number - remove country code if present, keep only digits
+   * Handles formats like: "916260440241", "6260440241", "+916260440241"
+   */
+  private normalizePhone(phone: string): string {
+    // Remove all non-digit characters
+    let digits = phone.replace(/\D/g, "");
+
+    // If starts with country code 91 and has 12 digits, remove it
+    if (digits.startsWith("91") && digits.length === 12) {
+      digits = digits.substring(2);
+    }
+
+    return digits;
+  }
+
   private async findOwnerByPhone(phone: string) {
-    const user = await prisma.user.findUnique({
-      where: { phone },
+    // Normalize the phone number
+    const normalizedPhone = this.normalizePhone(phone);
+
+    // Also try with country code
+    const phoneWithCountryCode = normalizedPhone.startsWith("91")
+      ? normalizedPhone
+      : `91${normalizedPhone}`;
+
+    console.log("[AUTH] Searching for owner with phone:", {
+      original: phone,
+      normalized: normalizedPhone,
+      withCountryCode: phoneWithCountryCode,
+    });
+
+    // Try to find user with normalized phone
+    const user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { phone: normalizedPhone },
+          { phone: phoneWithCountryCode },
+          { phone: phone }, // Also try original format
+        ],
+      },
       select: { id: true, name: true, phone: true },
     });
 
-    const admin = await prisma.admin.findUnique({
-      where: { phone },
+    // Try to find admin with normalized phone
+    const admin = await prisma.admin.findFirst({
+      where: {
+        OR: [
+          { phone: normalizedPhone },
+          { phone: phoneWithCountryCode },
+          { phone: phone }, // Also try original format
+        ],
+      },
       select: { id: true, name: true, phone: true },
+    });
+
+    console.log("[AUTH] Search results:", {
+      user: user ? { id: user.id, name: user.name, phone: user.phone } : null,
+      admin: admin
+        ? { id: admin.id, name: admin.name, phone: admin.phone }
+        : null,
     });
 
     if (user) return { ...user, role: "USER" as const };
@@ -95,15 +146,34 @@ export class AuthService {
 
   /* ---------------- LOGIN OTP ---------------- */
   async sendLoginOtp(phone: string) {
+    console.log("[AUTH] sendLoginOtp called with phone:", phone);
+
     const owner = await this.findOwnerByPhone(phone);
 
-    console.log("this is the owner i have consoled ", owner);
+    console.log(
+      "[AUTH] Owner found:",
+      owner
+        ? {
+            id: owner.id,
+            name: owner.name,
+            phone: owner.phone,
+            role: owner.role,
+          }
+        : null
+    );
 
-    if (!owner)
+    if (!owner) {
+      // List all admins for debugging
+      const allAdmins = await prisma.admin.findMany({
+        select: { id: true, name: true, phone: true, email: true },
+      });
+      console.log("[AUTH] All admins in database:", allAdmins);
+
       throw new AppError(
         "No account found with this number.Register your account",
         404
       );
+    }
 
     await this.createOtp(phone);
 
