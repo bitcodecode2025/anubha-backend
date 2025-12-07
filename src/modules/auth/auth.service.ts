@@ -216,13 +216,23 @@ export class AuthService {
 
   /* ---------------- GET ME ---------------- */
   async getMe(ownerId: string, role: "USER" | "ADMIN") {
+    console.log("[AUTH SERVICE] getMe called with:", { ownerId, role });
+
     if (role === "USER") {
       const user = await prisma.user.findUnique({
         where: { id: ownerId },
         select: { id: true, name: true, phone: true },
       });
 
-      if (!user) throw new AppError("User not found", 404);
+      if (!user) {
+        console.error("[AUTH SERVICE] User not found:", ownerId);
+        throw new AppError("User not found", 404);
+      }
+
+      console.log("[AUTH SERVICE] User found:", {
+        id: user.id,
+        name: user.name,
+      });
       return { ...user, role: "USER" };
     }
 
@@ -232,11 +242,20 @@ export class AuthService {
         select: { id: true, name: true, phone: true },
       });
 
-      if (!admin) throw new AppError("Admin not found", 404);
+      if (!admin) {
+        console.error("[AUTH SERVICE] Admin not found:", ownerId);
+        throw new AppError("Admin not found", 404);
+      }
+
+      console.log("[AUTH SERVICE] Admin found:", {
+        id: admin.id,
+        name: admin.name,
+      });
       return { ...admin, role: "ADMIN" };
     }
 
-    throw new AppError("Invalid role", 400);
+    console.error("[AUTH SERVICE] Invalid role:", role);
+    throw new AppError(`Invalid role: ${role}. Expected USER or ADMIN.`, 400);
   }
 }
 

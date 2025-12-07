@@ -115,23 +115,53 @@ export class AuthController {
 
   async getMe(req: Request, res: Response) {
     try {
+      console.log("[AUTH /me] Request received:", {
+        hasUser: !!req.user,
+        userId: req.user?.id,
+        userRole: req.user?.role,
+      });
+
       if (!req.user) {
+        console.log("[AUTH /me] No user found - returning 401");
         return res.status(401).json({
           success: false,
           message: "Not authenticated",
         });
       }
 
+      // Validate role before calling service
+      if (req.user.role !== "USER" && req.user.role !== "ADMIN") {
+        console.error("[AUTH /me] Invalid role:", req.user.role);
+        return res.status(400).json({
+          success: false,
+          message: `Invalid role: ${req.user.role}. Expected USER or ADMIN.`,
+        });
+      }
+
+      console.log("[AUTH /me] Calling authService.getMe with:", {
+        id: req.user.id,
+        role: req.user.role,
+      });
+
       const response = await authService.getMe(req.user.id, req.user.role);
 
+      console.log("[AUTH /me] Success - returning user data");
       return res.status(200).json({
         success: true,
         user: response,
       });
     } catch (error: any) {
-      return res.status(400).json({
-        success: false,
+      console.error("[AUTH /me] Error:", {
         message: error.message,
+        statusCode: error.statusCode,
+        stack: error.stack,
+      });
+
+      // Use error statusCode if available, otherwise default to 400
+      const statusCode = error.statusCode || 400;
+      return res.status(statusCode).json({
+        success: false,
+        message: error.message || "Failed to get user information",
       });
     }
   }
