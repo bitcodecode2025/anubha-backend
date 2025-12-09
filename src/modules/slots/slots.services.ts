@@ -1,4 +1,5 @@
 import prisma from "../../database/prismaclient";
+import { AppointmentStatus } from "@prisma/client";
 import { APPOINTMENT_MODES, AppointmentModeType } from "./slots.constants";
 import {
   generateSlotsForDate,
@@ -268,6 +269,29 @@ export async function addDoctorDayOff(opts: {
 }) {
   const adminId = await getSingleAdminId();
   const date = new Date(opts.date + "T00:00:00Z");
+  const dayEnd = new Date(date.getTime() + 24 * 60 * 60 * 1000);
+
+  // Block day-off if the doctor already has a confirmed appointment that day
+  const confirmedAppointment = await prisma.appointment.findFirst({
+    where: {
+      doctorId: adminId,
+      status: {
+        in: [AppointmentStatus.CONFIRMED, AppointmentStatus.PENDING],
+      },
+      isArchived: false,
+      startAt: {
+        gte: date,
+        lt: dayEnd,
+      },
+    },
+    select: { id: true, startAt: true },
+  });
+
+  if (confirmedAppointment) {
+    throw new Error(
+      "Cannot mark this day off because you have a confirmed or pending appointment on this date"
+    );
+  }
 
   const dayOff = await prisma.doctorDayOff.upsert({
     where: {
@@ -292,7 +316,7 @@ export async function addDoctorDayOff(opts: {
       adminId,
       startAt: {
         gte: date,
-        lt: new Date(date.getTime() + 24 * 60 * 60 * 1000),
+        lt: dayEnd,
       },
     },
   });
