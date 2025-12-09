@@ -5,7 +5,8 @@ import { createPatientSchema } from "./patient.validators";
 import { requireAuth } from "../../middleware/requireAuth";
 import { requireRole } from "../../middleware/requiredRole";
 import { attachUser } from "../../middleware/attachUser";
-import { patientLimiter } from "../../middleware/rateLimit";
+import { patientLimiter, generalLimiter } from "../../middleware/rateLimit";
+import { validateFieldSizes } from "../../middleware/fieldSizeValidator";
 import { createRecallSchema } from "./recall/recall.validation";
 import {
   createRecallHandler,
@@ -15,11 +16,15 @@ import {
 
 const patientRoutes = Router();
 
+// Apply general rate limiting to all patient routes
+patientRoutes.use(generalLimiter);
+
 patientRoutes.post(
   "/",
   attachUser,
   requireAuth,
   patientLimiter,
+  validateFieldSizes(), // Validate field sizes
   validateBody(createPatientSchema),
   (req, res) => patientController.create(req, res)
 );
@@ -53,6 +58,7 @@ patientRoutes.patch(
   attachUser,
   requireAuth,
   requireRole("ADMIN"),
+  validateFieldSizes(), // Validate field sizes
   (req, res) => patientController.adminUpdate(req, res)
 );
 
@@ -68,6 +74,8 @@ patientRoutes.post(
   "/recall",
   attachUser,
   requireAuth,
+  patientLimiter, // Apply rate limiting to recall creation
+  validateFieldSizes(), // Validate field sizes
   validateBody(createRecallSchema),
   createRecallHandler
 );

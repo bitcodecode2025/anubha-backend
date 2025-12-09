@@ -19,6 +19,13 @@ enum AppointmentStatus {
   COMPLETED
 }
 
+enum BookingProgress {
+  USER_DETAILS
+  RECALL
+  SLOT
+  PAYMENT
+}
+
 enum AppointmentMode {
   IN_PERSON
   ONLINE
@@ -138,6 +145,9 @@ model OTP {
 
   @@index([phone])
   @@index([expiresAt])
+  @@index([phone, expiresAt]) // Composite index for efficient cleanup queries
+  // Note: Multiple OTPs per phone allowed (for retry scenarios)
+  // Race condition handled at application level with atomic delete+create
 }
 
 model RefreshToken {
@@ -180,7 +190,7 @@ model Admin {
 // ============================================
 model PatientDetials {
   id                  String              @id @default(uuid())
-  user                User                @relation(fields: [userId], references: [id])
+  user                User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId              String
   name                String
   phone               String
@@ -236,9 +246,9 @@ model PatientDetials {
 
 model Recall {
   id            String         @id @default(uuid())
-  patient       PatientDetials @relation("PatientRecalls", fields: [patientId], references: [id])
+  patient       PatientDetials @relation("PatientRecalls", fields: [patientId], references: [id], onDelete: Cascade)
   patientId     String
-  appointment   Appointment?   @relation(fields: [appointmentId], references: [id])
+  appointment   Appointment?   @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
   appointmentId String?        @unique
   notes         String?
   entries       RecallEntry[]
@@ -275,7 +285,7 @@ model File {
   mimeType    String
   sizeInBytes Int
   provider    StorageProvider @default(CLOUDINARY)
-  patient     PatientDetials? @relation(fields: [patientId], references: [id])
+  patient     PatientDetials? @relation(fields: [patientId], references: [id], onDelete: Cascade)
   patientId   String?
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
@@ -291,13 +301,13 @@ model File {
 // ============================================
 model Slot {
   id          String          @id @default(uuid())
-  admin       Admin           @relation(fields: [adminId], references: [id])
+  admin       Admin           @relation(fields: [adminId], references: [id], onDelete: Cascade)
   adminId     String
   startAt     DateTime
   endAt       DateTime
   mode        AppointmentMode
   isBooked    Boolean         @default(false)
-  appointment Appointment?
+  appointments Appointment[]  // Changed to one-to-many: multiple appointments can reference same slot
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
   isArchived  Boolean         @default(false)
@@ -314,14 +324,15 @@ model Appointment {
   startAt                 DateTime
   endAt                   DateTime
   status                  AppointmentStatus   @default(PENDING)
-  user                    User                @relation(fields: [userId], references: [id])
+  bookingProgress         BookingProgress?    // Track where user left off
+  user                    User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId                  String
-  doctor                  Admin               @relation("DoctorAppointments", fields: [doctorId], references: [id])
+  doctor                  Admin               @relation("DoctorAppointments", fields: [doctorId], references: [id], onDelete: Restrict)
   doctorId                String
-  patient                 PatientDetials      @relation(fields: [patientId], references: [id])
+  patient                 PatientDetials      @relation(fields: [patientId], references: [id], onDelete: Cascade)
   patientId               String
-  slot                    Slot?               @relation(fields: [slotId], references: [id])
-  slotId                  String?             @unique
+  slot                    Slot?               @relation(fields: [slotId], references: [id], onDelete: SetNull)
+  slotId                  String?
   paymentId               String?
   paymentStatus           String              @default("PENDING")
   amount                  Int?
@@ -348,12 +359,17 @@ model Appointment {
   @@index([doctorId, startAt])
   @@index([patientId, startAt])
   @@index([status, startAt])
+  @@index([bookingProgress]) // Frequently queried for booking flow
+  @@index([status, bookingProgress]) // Common query pattern: PENDING appointments by progress
+  @@index([slotId, status]) // Prevent multiple PENDING appointments per slot
   @@index([isArchived])
+  // Note: Partial unique constraint (only one PENDING per slot) added via migration
+  // See prisma/migrations/add_partial_unique_constraint.sql
 }
 
 model DoctorDayOff {
   id         String    @id @default(uuid())
-  admin      Admin     @relation(fields: [adminId], references: [id])
+  admin      Admin     @relation(fields: [adminId], references: [id], onDelete: Cascade)
   adminId    String
   date       DateTime
   reason     String?
@@ -612,11 +628,11 @@ model FormSchema {
 // ============================================
 model DoctorFormSession {
   id            String          @id @default(uuid())
-  patient       PatientDetials? @relation(fields: [patientId], references: [id])
+  patient       PatientDetials? @relation(fields: [patientId], references: [id], onDelete: Cascade)
   patientId     String?
-  admin         Admin?          @relation(fields: [adminId], references: [id])
+  admin         Admin?          @relation(fields: [adminId], references: [id], onDelete: Cascade)
   adminId       String?
-  appointment   Appointment?    @relation(fields: [appointmentId], references: [id])
+  appointment   Appointment?    @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
   appointmentId String?
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt

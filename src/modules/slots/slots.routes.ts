@@ -13,8 +13,13 @@ import { requireRole } from "../../middleware/requiredRole";
 import { Role } from "@prisma/client";
 import { attachUser } from "../../middleware/attachUser";
 import { requireAuth } from "../../middleware/requireAuth";
+import { adminLimiter, generalLimiter } from "../../middleware/rateLimit";
+import { validateFieldSizes } from "../../middleware/fieldSizeValidator";
 
 const slotRoutes = Router();
+
+// Apply general rate limiting to all slot routes
+slotRoutes.use(generalLimiter);
 
 // Admin: preview slots for a date range (before creating)
 slotRoutes.get(
@@ -28,18 +33,22 @@ slotRoutes.get(
 // Admin: generate slots for a date range
 slotRoutes.post(
   "/admin/generate",
+  adminLimiter,
   attachUser,
   requireAuth,
   requireRole(Role.ADMIN),
+  validateFieldSizes(), // Validate field sizes
   generateSlotsHandler
 );
 
 // Admin: add a day off
 slotRoutes.post(
   "/admin/day-off",
+  adminLimiter,
   attachUser,
   requireAuth,
   requireRole(Role.ADMIN),
+  validateFieldSizes(), // Validate field sizes
   addDayOffHandler
 );
 

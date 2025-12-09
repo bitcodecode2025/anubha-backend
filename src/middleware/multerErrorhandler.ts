@@ -20,8 +20,9 @@ export const multerErrorHandler = (
   }
 
   if (err.name === "MulterFileTypeError") {
+    // Use the error message from the file filter (which is more specific)
     return res.status(400).json({
-      error: "Invalid file type. Only JPG, JPEG, and PNG files are allowed.",
+      error: err.message || "Invalid file type.",
     });
   }
 

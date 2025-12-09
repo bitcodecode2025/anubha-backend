@@ -1,7 +1,6 @@
 import express, { Request, Response } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import dotenv from "dotenv";
 import uploadRoutes from "./modules/upload/upload.routes";
 import { multerErrorHandler } from "./middleware/multerErrorhandler";
 import authRoutes from "./modules/auth/auth.routes";
@@ -17,10 +16,11 @@ import prisma from "./database/prismaclient";
 import { startAppointmentReminderCron } from "./cron/reminder";
 import { testMsg91Connection } from "./services/whatsapp.service";
 import { apiLogger } from "./middleware/apiLogger";
+import { env, validateRazorpayConfig } from "./config/env";
 
-dotenv.config();
-
-const PORT = Number(process.env.PORT) || 4000;
+// Environment variables are validated in ./config/env.ts
+// This will throw an error if required variables are missing
+const PORT = env.PORT;
 const app = express();
 
 app.use(cookieParser());
@@ -41,6 +41,8 @@ app.use(
   })
 );
 
+// Request body size limit: 20MB total
+// Individual field sizes are validated by fieldSizeValidator middleware
 app.use(express.json({ limit: "20mb" }));
 
 // API Logger middleware - logs all API calls for debugging
@@ -80,35 +82,107 @@ app.use("/api/admin", adminRoutes);
 app.use(multerErrorHandler);
 
 /**
+ * Validate Razorpay configuration
+ */
+function validatePaymentConfig() {
+  console.log("==========================================");
+  console.log("🔍 Validating Razorpay Configuration...");
+  console.log("==========================================");
+
+  const razorpayValidation = validateRazorpayConfig();
+
+  if (!razorpayValidation.isValid) {
+    console.error("❌ Razorpay configuration validation failed:");
+    razorpayValidation.errors.forEach((error, index) => {
+      console.error(`  ${index + 1}. ${error}`);
+    });
+    console.error("==========================================");
+    console.error(
+      "Payment processing will not work without valid Razorpay configuration."
+    );
+    console.error(
+      "Please set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in your .env file."
+    );
+    console.error("==========================================");
+    throw new Error(
+      `Razorpay configuration invalid: ${razorpayValidation.errors.join(", ")}`
+    );
+  }
+
+  if (razorpayValidation.warnings.length > 0) {
+    console.warn("⚠️  Razorpay configuration warnings:");
+    razorpayValidation.warnings.forEach((warning, index) => {
+      console.warn(`  ${index + 1}. ${warning}`);
+    });
+  }
+
+  console.log("✅ Razorpay configuration validated successfully");
+  console.log("  - Key ID: Set");
+  console.log("  - Key Secret: Set");
+  if (env.RAZORPAY_WEBHOOK_SECRET) {
+    console.log("  - Webhook Secret: Set");
+  } else {
+    console.log("  - Webhook Secret: Not set (webhook verification disabled)");
+  }
+  console.log("==========================================");
+}
+
+/**
  * Check database connection before starting server
  */
 async function checkDatabaseConnection() {
   try {
+    console.log("==========================================");
+    console.log("🔍 Testing database connection...");
+    console.log("==========================================");
+
     await prisma.$connect();
     console.log("✅ Database is running and connected!");
 
     // Test query to ensure database is responsive
     await prisma.$queryRaw`SELECT 1`;
     console.log("✅ Database connection test successful!");
+    console.log("==========================================");
   } catch (error) {
+    console.error("==========================================");
     console.error("❌ Database connection failed:", error);
+    console.error("==========================================");
     console.error("Please check your DATABASE_URL in .env file");
+    console.error(
+      "Expected format: postgresql://user:password@host:port/database"
+    );
+    console.error("==========================================");
     process.exit(1);
   }
 }
 
 // Start server after database check
 async function startServer() {
-  // Check database connection first
-  await checkDatabaseConnection();
+  try {
+    // Validate payment configuration
+    validatePaymentConfig();
 
-  // Start appointment reminder cron job
-  startAppointmentReminderCron();
+    // Check database connection
+    await checkDatabaseConnection();
 
-  // Start Express server
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
-  });
+    // Start appointment reminder cron job
+    startAppointmentReminderCron();
+
+    // Start Express server
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log("==========================================");
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      console.log(`📝 Environment: ${env.NODE_ENV}`);
+      console.log("==========================================");
+    });
+  } catch (error: any) {
+    console.error("==========================================");
+    console.error("❌ Failed to start server");
+    console.error("==========================================");
+    console.error("Error:", error.message);
+    console.error("==========================================");
+    process.exit(1);
+  }
 }
 
 // Start the application

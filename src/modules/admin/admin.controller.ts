@@ -7,6 +7,10 @@ import {
   sendDoctorNotificationMessage,
 } from "../../services/whatsapp.service";
 import { getSingleAdmin } from "../slots/slots.services";
+import cloudinary, {
+  generateSignedUrl,
+  deleteFromCloudinary,
+} from "../../util/cloudinary";
 
 function dateRangeFromQuery(dateStr?: string) {
   if (!dateStr) return undefined;
@@ -96,6 +100,11 @@ export async function adminUpdateAppointmentStatus(
   res: Response
 ) {
   try {
+    const adminId = req.user?.id;
+    if (!adminId) {
+      return res.status(401).json({ error: "Unauthenticated" });
+    }
+
     const { id } = req.params;
     const { status } = req.body as { status: AppointmentStatus };
 
@@ -103,65 +112,123 @@ export async function adminUpdateAppointmentStatus(
       return res.status(400).json({ error: "Missing status" });
     }
 
-    const appointment = await prisma.appointment.findUnique({
-      where: { id },
-      include: { slot: true },
-    });
+    // Use transaction with row-level locking to prevent race conditions
+    let previousStatus: AppointmentStatus | null = null;
+    const result = await prisma.$transaction(
+      async (tx) => {
+        // Lock appointment row to prevent concurrent updates
+        const lockedAppt = await tx.$queryRaw<
+          Array<{
+            id: string;
+            status: string;
+            doctorId: string;
+            slotId: string | null;
+          }>
+        >`
+          SELECT id, status, "doctorId", "slotId"
+          FROM "Appointment"
+          WHERE id = ${id}
+          FOR UPDATE
+        `;
 
-    if (!appointment) {
-      return res.status(404).json({ error: "Appointment not found" });
+        if (!lockedAppt || lockedAppt.length === 0) {
+          return { error: "Appointment not found", status: 404 };
+        }
+
+        const appointment = lockedAppt[0];
+
+        // Authorization check: Verify admin owns/manages this appointment
+        if (appointment.doctorId !== adminId) {
+          console.warn(
+            "[AUTH] Unauthorized appointment status update attempt:",
+            {
+              adminId,
+              appointmentId: id,
+              appointmentDoctorId: appointment.doctorId,
+              attemptedStatus: status,
+              timestamp: new Date().toISOString(),
+            }
+          );
+          return {
+            error:
+              "Forbidden. You don't have permission to modify this appointment.",
+            status: 403,
+          };
+        }
+
+        const current = appointment.status as AppointmentStatus;
+        previousStatus = current; // Store for notification check
+
+        if (current === "CANCELLED" || current === "COMPLETED") {
+          return {
+            error: `Cannot modify an appointment that is ${current}`,
+            status: 400,
+          };
+        }
+
+        const allowedStatuses: AppointmentStatus[] = [
+          "PENDING",
+          "CONFIRMED",
+          "CANCELLED",
+          "COMPLETED",
+        ];
+
+        if (!allowedStatuses.includes(status)) {
+          return { error: "Invalid status", status: 400 };
+        }
+
+        // Prepare update data
+        const updateData: any = { status };
+
+        // Clear bookingProgress when appointment is confirmed (no longer pending)
+        if (status === "CONFIRMED") {
+          updateData.bookingProgress = null;
+        }
+
+        // Update appointment atomically
+        const updated = await tx.appointment.update({
+          where: { id },
+          data: updateData,
+        });
+
+        // Update slot status atomically within same transaction
+        if (appointment.slotId) {
+          if (status === "CANCELLED") {
+            await tx.slot.update({
+              where: { id: appointment.slotId },
+              data: { isBooked: false },
+            });
+          } else if (status === "CONFIRMED") {
+            await tx.slot.update({
+              where: { id: appointment.slotId },
+              data: { isBooked: true },
+            });
+          }
+        }
+
+        return { appointment: updated };
+      },
+      {
+        timeout: 10000, // 10 second timeout
+        isolationLevel: "ReadCommitted",
+      }
+    );
+
+    if (result.error) {
+      return res.status(result.status || 500).json({ error: result.error });
     }
 
-    const current = appointment.status;
-
-    if (current === "CANCELLED" || current === "COMPLETED") {
-      return res.status(400).json({
-        error: `Cannot modify an appointment that is ${current}`,
-      });
-    }
-
-    const allowedStatuses: AppointmentStatus[] = [
-      "PENDING",
-      "CONFIRMED",
-      "CANCELLED",
-      "COMPLETED",
-    ];
-
-    if (!allowedStatuses.includes(status)) {
-      return res.status(400).json({ error: "Invalid status" });
-    }
-
-    let slotUpdate = undefined;
-    if (status === "CANCELLED" && appointment.slotId) {
-      slotUpdate = prisma.slot.update({
-        where: { id: appointment.slotId },
-        data: { isBooked: false },
-      });
-    }
-
-    if (status === "CONFIRMED" && appointment.slotId) {
-      slotUpdate = prisma.slot.update({
-        where: { id: appointment.slotId },
-        data: { isBooked: true },
-      });
-    }
-
-    const updated = await prisma.appointment.update({
-      where: { id },
-      data: { status },
-    });
-
-    if (slotUpdate) await slotUpdate;
+    const updated = result.appointment!;
 
     // Send WhatsApp notifications if appointment is being confirmed
     // This handles manual confirmation by admin (not just payment flow)
-    if (status === "CONFIRMED" && current !== "CONFIRMED") {
+    if (status === "CONFIRMED" && previousStatus !== "CONFIRMED") {
       console.log("==========================================");
       console.log(
         "[ADMIN] Appointment manually confirmed, sending WhatsApp notifications..."
       );
       console.log("  Appointment ID:", id);
-      console.log("  Previous Status:", current);
+      console.log("  Previous Status:", previousStatus);
       console.log("  New Status:", status);
       console.log("==========================================");
 
@@ -213,6 +280,11 @@ export async function adminUpdateAppointmentStatus(
 
 export async function adminGetAppointmentDetails(req: Request, res: Response) {
   try {
+    const adminId = req.user?.id;
+    if (!adminId) {
+      return res.status(401).json({ error: "Unauthenticated" });
+    }
+
     const id = req.params.id;
     if (!id) return res.status(400).json({ error: "Missing id param" });
 
@@ -248,6 +320,20 @@ export async function adminGetAppointmentDetails(req: Request, res: Response) {
       return res.status(404).json({ error: "Appointment not found" });
     }
 
+    // Authorization check: Verify admin owns/manages this appointment
+    if (appt.doctorId !== adminId) {
+      console.warn("[AUTH] Unauthorized appointment details access attempt:", {
+        adminId,
+        appointmentId: id,
+        appointmentDoctorId: appt.doctorId,
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        error:
+          "Forbidden. You don't have permission to access this appointment.",
+      });
+    }
+
     console.log("[ADMIN] Appointment found successfully");
     return res.json({ success: true, appointment: appt });
   } catch (err: any) {
@@ -277,6 +363,11 @@ export async function createDoctorSession(req: Request, res: Response) {
     if (appointmentId) {
       const appt = await prisma.appointment.findUnique({
         where: { id: appointmentId },
+        select: {
+          id: true,
+          patientId: true,
+          doctorId: true,
+        },
       });
       if (!appt)
         return res.status(404).json({ error: "Appointment not found" });
@@ -284,6 +375,19 @@ export async function createDoctorSession(req: Request, res: Response) {
         return res
           .status(400)
           .json({ error: "Appointment does not belong to patientId" });
+      }
+      // Authorization check: Verify admin owns/manages this appointment
+      if (appt.doctorId !== adminId) {
+        console.warn("[AUTH] Unauthorized doctor session creation attempt:", {
+          adminId,
+          appointmentId,
+          appointmentDoctorId: appt.doctorId,
+          timestamp: new Date().toISOString(),
+        });
+        return res.status(403).json({
+          error:
+            "Forbidden. You don't have permission to create a session for this appointment.",
+        });
       }
     }
 
@@ -428,7 +532,7 @@ export async function saveDoctorSession(req: Request, res: Response) {
     if (appointmentId) {
       const appointment = await prisma.appointment.findUnique({
         where: { id: appointmentId },
-        select: { id: true, patientId: true },
+        select: { id: true, patientId: true, doctorId: true },
       });
       if (!appointment) {
         return res.status(404).json({ error: "Appointment not found" });
@@ -437,6 +541,19 @@ export async function saveDoctorSession(req: Request, res: Response) {
         return res
           .status(400)
           .json({ error: "Appointment does not belong to this patient" });
+      }
+      // Authorization check: Verify admin owns/manages this appointment
+      if (appointment.doctorId !== adminId) {
+        console.warn("[AUTH] Unauthorized doctor session save attempt:", {
+          adminId,
+          appointmentId,
+          appointmentDoctorId: appointment.doctorId,
+          timestamp: new Date().toISOString(),
+        });
+        return res.status(403).json({
+          error:
+            "Forbidden. You don't have permission to save a session for this appointment.",
+        });
       }
     }
 
@@ -529,8 +646,11 @@ export async function saveDoctorNotes(req: Request, res: Response) {
       );
     }
 
-    // Check if request is multipart/form-data (has file)
-    if (req.file || (req as any).body?.formData) {
+    // Check if request is multipart/form-data (has files)
+    const files = (req.files as Express.Multer.File[]) || [];
+    const hasFiles = files.length > 0;
+
+    if (hasFiles || (req as any).body?.formData) {
       // Multipart form data
       if (!isPatch) {
         appointmentId = (req as any).body.appointmentId;
@@ -541,7 +661,7 @@ export async function saveDoctorNotes(req: Request, res: Response) {
         (req as any).body.isDraft === true;
 
       console.log(
-        `[BACKEND] Parsing form data - Is Draft: ${isDraft}, Has File: ${!!req.file}`
+        `[BACKEND] Parsing form data - Is Draft: ${isDraft}, Has Files: ${hasFiles}, File Count: ${files.length}`
       );
 
       try {
@@ -562,15 +682,107 @@ export async function saveDoctorNotes(req: Request, res: Response) {
         });
       }
 
-      // Handle file upload if present (dietChart)
-      if (req.file) {
-        // File is available in req.file
-        // You can upload to cloudinary or save file path here
-        // For now, we'll store the file info in formData
-        parsedFormData.dietPrescribed = parsedFormData.dietPrescribed || {};
-        parsedFormData.dietPrescribed.dietChartFileName = req.file.originalname;
-        parsedFormData.dietPrescribed.dietChartFileSize = req.file.size;
-        parsedFormData.dietPrescribed.dietChartMimeType = req.file.mimetype;
+      // Handle multiple file uploads (dietChart PDFs)
+      if (hasFiles) {
+        console.log(`[BACKEND] Processing ${files.length} file upload(s)`);
+
+        const uploadedFiles: Array<{
+          fileName: string;
+          fileUrl: string;
+          publicId: string;
+          mimeType: string;
+          sizeInBytes: number;
+        }> = [];
+
+        // Process each file
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          console.log(`[BACKEND] Processing file ${i + 1}/${files.length}:`, {
+            filename: file.originalname,
+            mimetype: file.mimetype,
+            size: file.size,
+          });
+
+          try {
+            // Upload file to Cloudinary
+            const base64 = `data:${file.mimetype};base64,${file.buffer.toString(
+              "base64"
+            )}`;
+
+            // Generate unique public_id
+            const timestamp = Date.now();
+            const randomStr = Math.random().toString(36).substring(2, 15);
+            const uniqueId = `nutriwell_diet_chart_${timestamp}_${randomStr}_${i}`;
+
+            // Upload to Cloudinary
+            const cloudinaryResult = await cloudinary.uploader.upload(base64, {
+              folder: "nutriwell_diet_charts",
+              resource_type:
+                file.mimetype === "application/pdf" ? "raw" : "image",
+              public_id: uniqueId,
+              context: {
+                uploaded_at: new Date().toISOString(),
+                uploaded_by: adminId,
+                original_filename: file.originalname,
+                appointment_id: appointmentId || "unknown",
+                file_index: i.toString(),
+              },
+            });
+
+            console.log(`[BACKEND] File ${i + 1} uploaded to Cloudinary:`, {
+              publicId: cloudinaryResult.public_id,
+              url: cloudinaryResult.secure_url,
+              resourceType: cloudinaryResult.resource_type,
+            });
+
+            // Generate signed URL for secure access
+            // Use the same resource_type as the upload (raw for PDFs, image for images)
+            const resourceType =
+              file.mimetype === "application/pdf" ? "raw" : "image";
+            const signedUrl = generateSignedUrl(
+              cloudinaryResult.public_id,
+              365 * 24 * 60 * 60,
+              resourceType as "raw" | "image"
+            );
+
+            // Store file info
+            uploadedFiles.push({
+              fileName: file.originalname,
+              fileUrl: signedUrl,
+              publicId: cloudinaryResult.public_id,
+              mimeType: file.mimetype,
+              sizeInBytes: file.size,
+            });
+
+            // Store first file info in formData for backward compatibility
+            if (i === 0) {
+              parsedFormData.dietPrescribed =
+                parsedFormData.dietPrescribed || {};
+              parsedFormData.dietPrescribed.dietChartFileName =
+                file.originalname;
+              parsedFormData.dietPrescribed.dietChartFileSize = file.size;
+              parsedFormData.dietPrescribed.dietChartMimeType = file.mimetype;
+              parsedFormData.dietPrescribed.dietChartUrl = signedUrl;
+              parsedFormData.dietPrescribed.dietChartPublicId =
+                cloudinaryResult.public_id;
+            }
+          } catch (uploadError: any) {
+            console.error(`[BACKEND] File ${i + 1} upload error:`, uploadError);
+            return res.status(500).json({
+              success: false,
+              error: `Failed to upload file "${file.originalname}": ${
+                uploadError.message || "Unknown error"
+              }`,
+            });
+          }
+        }
+
+        // Store all uploaded files for attachment creation
+        (req as any).uploadedFiles = uploadedFiles;
+
+        console.log(
+          `[BACKEND] Successfully processed ${uploadedFiles.length} file(s)`
+        );
       }
     } else {
       // Regular JSON request
@@ -602,6 +814,10 @@ export async function saveDoctorNotes(req: Request, res: Response) {
     // Verify appointment exists
     const appointment = await prisma.appointment.findUnique({
       where: { id: validatedAppointmentId },
+      select: {
+        id: true,
+        doctorId: true,
+      },
     });
 
     if (!appointment) {
@@ -609,6 +825,21 @@ export async function saveDoctorNotes(req: Request, res: Response) {
       return res.status(404).json({
         success: false,
         error: "Appointment not found",
+      });
+    }
+
+    // Authorization check: Verify admin owns/manages this appointment
+    if (appointment.doctorId !== adminId) {
+      console.warn("[AUTH] Unauthorized doctor notes save attempt:", {
+        adminId,
+        appointmentId: validatedAppointmentId,
+        appointmentDoctorId: appointment.doctorId,
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        success: false,
+        error:
+          "Forbidden. You don't have permission to modify notes for this appointment.",
       });
     }
 
@@ -660,6 +891,63 @@ export async function saveDoctorNotes(req: Request, res: Response) {
       },
     });
 
+    // Handle file attachments if files were uploaded
+    const uploadedFiles = (req as any).uploadedFiles || [];
+    if (uploadedFiles.length > 0) {
+      console.log(`[BACKEND] Creating ${uploadedFiles.length} attachment(s)`);
+
+      // Create attachments for each uploaded file
+      for (const uploadedFile of uploadedFiles) {
+        // Check if attachment with same publicId already exists
+        const existingAttachment = await prisma.doctorNoteAttachment.findFirst({
+          where: {
+            doctorNotesId: doctorNotes.id,
+            filePath: uploadedFile.publicId, // Match by Cloudinary public_id
+            isArchived: false,
+          },
+        });
+
+        if (existingAttachment) {
+          // Update existing attachment
+          await prisma.doctorNoteAttachment.update({
+            where: { id: existingAttachment.id },
+            data: {
+              fileName: uploadedFile.fileName,
+              fileUrl: uploadedFile.fileUrl,
+              mimeType: uploadedFile.mimeType,
+              sizeInBytes: uploadedFile.sizeInBytes,
+              updatedAt: new Date(),
+            },
+          });
+          console.log(
+            `[BACKEND] Updated existing attachment: ${uploadedFile.fileName}`
+          );
+        } else {
+          // Create new attachment
+          await prisma.doctorNoteAttachment.create({
+            data: {
+              doctorNotesId: doctorNotes.id,
+              fileName: uploadedFile.fileName,
+              filePath: uploadedFile.publicId, // Store Cloudinary public_id as filePath
+              fileUrl: uploadedFile.fileUrl,
+              mimeType: uploadedFile.mimeType,
+              sizeInBytes: uploadedFile.sizeInBytes,
+              provider: "CLOUDINARY",
+              fileCategory: "DIET_CHART",
+              section: "DietPrescribed",
+            },
+          });
+          console.log(
+            `[BACKEND] Created new attachment: ${uploadedFile.fileName}`
+          );
+        }
+      }
+
+      console.log(
+        `[BACKEND] Successfully processed ${uploadedFiles.length} attachment(s)`
+      );
+    }
+
     // Verify bodyMeasurements was saved
     if (
       doctorNotes.formData &&
@@ -696,13 +984,43 @@ export async function saveDoctorNotes(req: Request, res: Response) {
     });
   } catch (err: any) {
     const duration = Date.now() - startTime;
-    console.error(
-      `[BACKEND] Save Doctor Notes Error (${duration}ms):`,
-      err.message || err
-    );
-    return res.status(500).json({
+
+    // Log comprehensive error details
+    console.error(`[BACKEND] Save Doctor Notes Error (${duration}ms):`, {
+      error: err,
+      errorType: err?.constructor?.name,
+      errorMessage: err?.message,
+      errorStack: err?.stack,
+      errorName: err?.name,
+      errorCode: err?.code,
+      errorStatus: err?.status,
+      errorResponse: err?.response,
+    });
+
+    // Handle different error types
+    let statusCode = 500;
+    let errorMessage = "Failed to save doctor notes";
+
+    // Check if it's a validation error from middleware
+    if (err?.status === 400 || err?.response?.status === 400) {
+      statusCode = 400;
+      if (err?.response?.data?.errors) {
+        errorMessage = err.response.data.errors.join(". ");
+      } else if (err?.response?.data?.error) {
+        errorMessage = err.response.data.error;
+      } else if (err?.response?.data?.message) {
+        errorMessage = err.response.data.message;
+      }
+    } else if (err?.message) {
+      errorMessage = err.message;
+    } else if (typeof err === "string") {
+      errorMessage = err;
+    }
+
+    return res.status(statusCode).json({
       success: false,
-      error: err.message || "Failed to save doctor notes",
+      error: errorMessage,
+      ...(err?.response?.data?.errors && { errors: err.response.data.errors }),
     });
   }
 }
@@ -857,6 +1175,14 @@ export async function getDoctorNotes(req: Request, res: Response) {
   console.log("[BACKEND] GET /admin/doctor-notes/:appointmentId");
 
   try {
+    const adminId = (req as any).user?.id;
+    if (!adminId) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized",
+      });
+    }
+
     const { appointmentId } = req.params;
     console.log("[BACKEND] Fetching notes for appointment:", appointmentId);
 
@@ -868,9 +1194,50 @@ export async function getDoctorNotes(req: Request, res: Response) {
       });
     }
 
+    // Verify appointment exists and admin owns it
+    const appointment = await prisma.appointment.findUnique({
+      where: { id: appointmentId },
+      select: {
+        id: true,
+        doctorId: true,
+      },
+    });
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        error: "Appointment not found",
+      });
+    }
+
+    // Authorization check: Verify admin owns/manages this appointment
+    if (appointment.doctorId !== adminId) {
+      console.warn("[AUTH] Unauthorized doctor notes access attempt:", {
+        adminId,
+        appointmentId,
+        appointmentDoctorId: appointment.doctorId,
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        success: false,
+        error:
+          "Forbidden. You don't have permission to access notes for this appointment.",
+      });
+    }
+
     const doctorNotes = await prisma.doctorNotes.findUnique({
       where: {
         appointmentId: appointmentId,
+      },
+      include: {
+        attachments: {
+          where: {
+            isArchived: false,
+          },
+          orderBy: {
+            createdAt: "desc",
+          },
+        },
       },
     });
 
@@ -896,7 +1263,7 @@ export async function getDoctorNotes(req: Request, res: Response) {
 
     const duration = Date.now() - startTime;
     console.log(
-      `[BACKEND] GET completed in ${duration}ms - Notes ID: ${doctorNotes.id}`
+      `[BACKEND] GET completed in ${duration}ms - Notes ID: ${doctorNotes.id}, Attachments: ${doctorNotes.attachments.length}`
     );
 
     return res.json({
@@ -910,6 +1277,50 @@ export async function getDoctorNotes(req: Request, res: Response) {
         isCompleted: doctorNotes.isCompleted,
         createdAt: doctorNotes.createdAt.toISOString(),
         updatedAt: doctorNotes.updatedAt.toISOString(),
+        attachments: doctorNotes.attachments.map((att) => {
+          // Regenerate signed URL with correct resource type
+          let resourceType: "image" | "raw" | "video" | "auto" = "image";
+          if (att.mimeType === "application/pdf") {
+            resourceType = "raw";
+          } else if (att.mimeType?.startsWith("video/")) {
+            resourceType = "video";
+          } else if (att.mimeType?.startsWith("image/")) {
+            resourceType = "image";
+          } else if (att.mimeType && !att.mimeType.startsWith("image/")) {
+            // For other file types, use raw
+            resourceType = "raw";
+          }
+
+          // Regenerate signed URL if publicId exists
+          let fileUrl = att.fileUrl;
+          if (att.filePath) {
+            // filePath stores the Cloudinary public_id
+            try {
+              fileUrl = generateSignedUrl(
+                att.filePath,
+                365 * 24 * 60 * 60,
+                resourceType
+              );
+            } catch (error: any) {
+              console.error(
+                `[BACKEND] Failed to regenerate URL for attachment ${att.id}:`,
+                error.message
+              );
+              // Keep original URL if regeneration fails
+            }
+          }
+
+          return {
+            id: att.id,
+            fileName: att.fileName,
+            fileUrl: fileUrl,
+            mimeType: att.mimeType,
+            sizeInBytes: att.sizeInBytes,
+            fileCategory: att.fileCategory,
+            section: att.section,
+            createdAt: att.createdAt.toISOString(),
+          };
+        }),
       },
     });
   } catch (err: any) {
@@ -921,6 +1332,114 @@ export async function getDoctorNotes(req: Request, res: Response) {
     return res.status(500).json({
       success: false,
       error: err.message || "Failed to get doctor notes",
+    });
+  }
+}
+
+/**
+ * Delete a doctor note attachment (PDF)
+ * Deletes from both database and Cloudinary
+ */
+export async function deleteDoctorNoteAttachment(req: Request, res: Response) {
+  const startTime = Date.now();
+  const attachmentId = req.params.attachmentId;
+  const adminId = req.user?.id;
+
+  if (!adminId) {
+    return res.status(401).json({
+      success: false,
+      error: "Unauthorized",
+    });
+  }
+
+  if (!attachmentId) {
+    return res.status(400).json({
+      success: false,
+      error: "Attachment ID is required",
+    });
+  }
+
+  try {
+    console.log(
+      `[BACKEND] Delete Doctor Note Attachment - Attachment ID: ${attachmentId}`
+    );
+
+    // Find the attachment
+    const attachment = await prisma.doctorNoteAttachment.findUnique({
+      where: { id: attachmentId },
+      include: {
+        doctorNotes: {
+          select: {
+            id: true,
+            appointmentId: true,
+            createdBy: true,
+          },
+        },
+      },
+    });
+
+    if (!attachment) {
+      return res.status(404).json({
+        success: false,
+        error: "Attachment not found",
+      });
+    }
+
+    // Verify admin has access to this attachment's doctor notes
+    // (Optional: Add additional authorization checks if needed)
+
+    // Delete from Cloudinary if publicId exists
+    if (attachment.filePath && attachment.provider === "CLOUDINARY") {
+      try {
+        console.log(
+          `[BACKEND] Deleting file from Cloudinary: ${attachment.filePath}`
+        );
+        const deleteResult = await deleteFromCloudinary(attachment.filePath);
+        if (deleteResult?.result === "ok") {
+          console.log(
+            `[BACKEND] Successfully deleted file from Cloudinary: ${attachment.filePath}`
+          );
+        } else {
+          console.warn(
+            `[BACKEND] Cloudinary delete returned: ${deleteResult?.result}`
+          );
+        }
+      } catch (cloudinaryError: any) {
+        console.error(
+          `[BACKEND] Failed to delete from Cloudinary:`,
+          cloudinaryError.message
+        );
+        // Continue with database deletion even if Cloudinary deletion fails
+      }
+    }
+
+    // Delete from database (soft delete by archiving)
+    await prisma.doctorNoteAttachment.update({
+      where: { id: attachmentId },
+      data: {
+        isArchived: true,
+        archivedAt: new Date(),
+      },
+    });
+
+    const duration = Date.now() - startTime;
+    console.log(
+      `[BACKEND] Delete Doctor Note Attachment completed in ${duration}ms`
+    );
+
+    return res.json({
+      success: true,
+      message: "Attachment deleted successfully",
+    });
+  } catch (err: any) {
+    const duration = Date.now() - startTime;
+    console.error(
+      `[BACKEND] Delete Doctor Note Attachment Error (${duration}ms):`,
+      err.message || err
+    );
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Failed to delete attachment",
     });
   }
 }

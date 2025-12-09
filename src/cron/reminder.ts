@@ -250,17 +250,37 @@ async function sendReminderForAppointment(
     console.warn("==========================================");
   }
 
-  // Mark reminder as sent
+  // SECURITY: Mark reminder as sent using atomic update to prevent duplicate reminders
+  // Use updateMany with WHERE clause to ensure only one cron instance can mark it as sent
+  // This prevents race condition if cron runs twice simultaneously
   try {
-    await prisma.appointment.update({
-      where: { id: appointmentId },
+    const updateResult = await prisma.appointment.updateMany({
+      where: {
+        id: appointmentId,
+        reminderSent: false, // Only update if reminder hasn't been sent yet
+      },
       data: { reminderSent: true },
     });
-    console.log("==========================================");
-    console.log(`[CRON REMINDER] ✅ Reminder marked as sent`);
-    console.log("  Appointment ID:", appointmentId);
-    console.log("  reminderSent: true");
-    console.log("==========================================");
+
+    if (updateResult.count > 0) {
+      console.log("==========================================");
+      console.log(`[CRON REMINDER] ✅ Reminder marked as sent (atomic update)`);
+      console.log("  Appointment ID:", appointmentId);
+      console.log("  reminderSent: true");
+      console.log("  Rows updated:", updateResult.count);
+      console.log("==========================================");
+    } else {
+      // Reminder was already sent by another cron instance (race condition handled)
+      console.log("==========================================");
+      console.log(
+        `[CRON REMINDER] ⚠️ Reminder already sent (duplicate prevented)`
+      );
+      console.log("  Appointment ID:", appointmentId);
+      console.log(
+        "  This is normal if cron runs multiple times simultaneously"
+      );
+      console.log("==========================================");
+    }
   } catch (error: any) {
     console.error("==========================================");
     console.error(`[CRON REMINDER] ❌ Failed to mark reminder as sent`);

@@ -17,7 +17,10 @@ export const nameSchema = z
   .string()
   .trim()
   .min(2, "Name must be at least 2 characters long.")
-  .max(50, "Name must be less than 50 characters");
+  .max(100, "Name must be less than 100 characters")
+  .refine((val) => val.length <= 100, {
+    message: "Name exceeds maximum length of 100 characters",
+  });
 
 export const otpSchema = z
   .string()

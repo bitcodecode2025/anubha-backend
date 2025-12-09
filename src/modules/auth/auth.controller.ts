@@ -154,14 +154,51 @@ export class AuthController {
       console.error("[AUTH /me] Error:", {
         message: error.message,
         statusCode: error.statusCode,
+        errorCode: error.code,
+        errorName: error.name,
         stack: error.stack,
       });
 
-      // Use error statusCode if available, otherwise default to 400
-      const statusCode = error.statusCode || 400;
+      // Check if it's a database connection error
+      // Prisma error codes: https://www.prisma.io/docs/reference/api-reference/error-reference
+      const isDatabaseError =
+        error.code === "P1001" || // Can't reach database server
+        error.code === "P1002" || // Database connection timeout
+        error.code === "P1003" || // Database does not exist
+        error.code === "P1008" || // Operations timed out
+        error.code === "P1017" || // Server has closed the connection
+        error.code === "P2002" || // Unique constraint violation (might indicate DB issues)
+        error.code === "P2024" || // Connection pool timeout
+        error.code === "P2025" || // Record not found (but could be DB issue)
+        error.message?.includes("Can't reach database server") ||
+        error.message?.includes("database server") ||
+        error.message?.includes("connection") ||
+        error.message?.includes("timeout") ||
+        error.name === "PrismaClientInitializationError" ||
+        error.name === "PrismaClientKnownRequestError" ||
+        (error.name === "Error" && error.message?.includes("prisma"));
+
+      // Use error statusCode if available
+      // Database errors should be 500 (server error), not 400 (client error)
+      // Authentication errors (AppError with statusCode) should use that statusCode
+      let statusCode = error.statusCode;
+
+      if (!statusCode) {
+        // If no statusCode, determine based on error type
+        if (isDatabaseError) {
+          statusCode = 500; // Server error - database unavailable
+        } else {
+          statusCode = 400; // Client error - invalid request
+        }
+      }
+
       return res.status(statusCode).json({
         success: false,
         message: error.message || "Failed to get user information",
+        ...(isDatabaseError && {
+          errorType: "database_error",
+          retryable: true,
+        }),
       });
     }
   }

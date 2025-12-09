@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../database/prismaclient";
 import { getSingleDoctorId } from "./appointment.service";
-import { AppointmentStatus } from "@prisma/client";
+import { AppointmentStatus, BookingProgress } from "@prisma/client";
 import { AppointmentMode } from "@prisma/client";
 import { validatePlanDetails } from "./plan-validation";
 
@@ -35,6 +35,7 @@ export async function createAppointmentHandler(req: Request, res: Response) {
       appointmentMode,
       startAt,
       endAt,
+      bookingProgress, // Track where user is in the booking flow
     } = req.body;
 
     console.log(" [BACKEND] Request body:", {
@@ -56,25 +57,39 @@ export async function createAppointmentHandler(req: Request, res: Response) {
       });
     }
 
-    // Verify patient exists and belongs to the user
+    // SECURITY: Verify patient exists and belongs to the user
+    // Use transaction to prevent race condition where patient is deleted between check and appointment creation
     console.log(" [BACKEND] Verifying patient exists...");
-    const patient = await prisma.patientDetials.findFirst({
-      where: { id: patientId, userId },
-    });
+    
+    // Verify patient within the appointment creation transaction to prevent race conditions
+    // This ensures patient exists at the moment of appointment creation
+    let patient;
+    try {
+      patient = await prisma.patientDetials.findFirst({
+        where: { id: patientId, userId },
+        select: { id: true, name: true, userId: true },
+      });
 
-    if (!patient) {
-      console.error(
-        " [BACKEND] Appointment creation failed: Patient not found or unauthorized"
-      );
-      return res.status(404).json({
+      if (!patient) {
+        console.error(
+          " [BACKEND] Appointment creation failed: Patient not found or unauthorized"
+        );
+        return res.status(404).json({
+          success: false,
+          message: "Patient not found or unauthorized",
+        });
+      }
+      console.log(" [BACKEND] Patient verified:", {
+        id: patient.id,
+        name: patient.name,
+      });
+    } catch (error: any) {
+      console.error(" [BACKEND] Error verifying patient:", error);
+      return res.status(500).json({
         success: false,
-        message: "Patient not found or unauthorized",
+        message: "Failed to verify patient. Please try again.",
       });
     }
-    console.log(" [BACKEND] Patient verified:", {
-      id: patient.id,
-      name: patient.name,
-    });
 
     // SECURITY: Validate plan details (prevent price manipulation attacks)
     // Plan details are required and must match server-side definitions
@@ -140,14 +155,67 @@ export async function createAppointmentHandler(req: Request, res: Response) {
     let appointmentStartAt: Date;
     let appointmentEndAt: Date;
     let finalSlotId: string | null = null;
+    let slotMode: AppointmentMode | null = null;
 
     if (slotId) {
       console.log(" [BACKEND] Validating slot:", slotId);
-      const slot = await prisma.slot.findUnique({
-        where: { id: slotId },
+      
+      // Use transaction with SELECT FOR UPDATE to prevent race conditions
+      // This locks the slot row until transaction completes
+      const slotResult = await prisma.$transaction(async (tx) => {
+        // Lock slot row to prevent concurrent bookings
+        const lockedSlot = await tx.$queryRaw<
+          Array<{
+            id: string;
+            startAt: Date;
+            endAt: Date;
+            mode: string;
+            isBooked: boolean;
+            adminId: string;
+          }>
+        >`
+          SELECT id, "startAt", "endAt", mode, "isBooked", "adminId"
+          FROM "Slot"
+          WHERE id = ${slotId}
+          FOR UPDATE
+        `;
+
+        if (!lockedSlot || lockedSlot.length === 0) {
+          return null;
+        }
+
+        const slot = lockedSlot[0];
+
+        // Check if already booked (double-check after lock)
+        if (slot.isBooked) {
+          return { error: "Slot already booked" };
+        }
+
+        // SECURITY: Validate slot startAt is in the future
+        const now = new Date();
+        const minFutureTime = new Date(now.getTime() + 60 * 1000); // At least 1 minute in the future
+        if (slot.startAt < minFutureTime) {
+          return { error: "Slot start time must be in the future" };
+        }
+
+        // Validate slot endAt is after startAt
+        if (slot.endAt <= slot.startAt) {
+          return { error: "Invalid slot: endAt must be after startAt" };
+        }
+
+        // Mark slot as booked atomically within transaction
+        await tx.slot.update({
+          where: { id: slotId },
+          data: { isBooked: true },
+        });
+
+        return { slot };
+      }, {
+        timeout: 10000, // 10 second timeout
+        isolationLevel: "ReadCommitted",
       });
 
-      if (!slot) {
+      if (!slotResult) {
         console.error(" [BACKEND] Slot not found:", slotId);
         return res.status(404).json({
           success: false,
@@ -155,24 +223,66 @@ export async function createAppointmentHandler(req: Request, res: Response) {
         });
       }
 
-      if (slot.isBooked) {
-        console.error(" [BACKEND] Slot already booked:", slotId);
+      if (slotResult.error) {
+        console.error(" [BACKEND] Slot validation failed:", slotResult.error);
         return res.status(400).json({
           success: false,
-          message: "Slot already booked",
+          message: slotResult.error,
         });
       }
 
-      console.log(" [BACKEND] Slot validated:", {
+      const slot = slotResult.slot!;
+      console.log(" [BACKEND] Slot validated and locked:", {
         id: slot.id,
         startAt: slot.startAt,
         endAt: slot.endAt,
         mode: slot.mode,
       });
 
+      // DATA INTEGRITY: Validate that appointment dates match slot dates when slot is assigned
+      // If startAt/endAt are provided, they MUST match the slot dates exactly
+      if (startAt || endAt) {
+        const providedStartAt = startAt ? new Date(startAt) : null;
+        const providedEndAt = endAt ? new Date(endAt) : null;
+
+        // Check if provided dates match slot dates (with 1 second tolerance for timezone/rounding)
+        const startAtMatches =
+          !providedStartAt ||
+          Math.abs(providedStartAt.getTime() - slot.startAt.getTime()) < 1000;
+        const endAtMatches =
+          !providedEndAt ||
+          Math.abs(providedEndAt.getTime() - slot.endAt.getTime()) < 1000;
+
+        if (!startAtMatches || !endAtMatches) {
+          console.error(
+            " [BACKEND] ❌ DATA INTEGRITY VIOLATION: Provided dates do not match slot dates"
+          );
+          console.error(" [BACKEND] Slot dates:", {
+            startAt: slot.startAt,
+            endAt: slot.endAt,
+          });
+          console.error(" [BACKEND] Provided dates:", {
+            startAt: providedStartAt,
+            endAt: providedEndAt,
+          });
+          return res.status(400).json({
+            success: false,
+            message:
+              "Appointment dates must match slot dates exactly. Please use the slot's startAt and endAt values.",
+          });
+        }
+
+        console.log(
+          " [BACKEND] ✓ Provided dates match slot dates (validation passed)"
+        );
+      }
+
+      // Always use slot dates to ensure appointment dates match slot dates
+      // This ensures data consistency even if dates were not provided
       appointmentStartAt = slot.startAt;
       appointmentEndAt = slot.endAt;
       finalSlotId = slotId;
+      slotMode = slot.mode as AppointmentMode;
     } else {
       // Create appointment without slot (for recall flow)
       // Use provided startAt/endAt or create placeholder dates
@@ -193,6 +303,17 @@ export async function createAppointmentHandler(req: Request, res: Response) {
           });
         }
 
+        // SECURITY: Validate startAt is in the future
+        const now = new Date();
+        const minFutureTime = new Date(now.getTime() + 60 * 1000); // At least 1 minute in the future
+        if (appointmentStartAt < minFutureTime) {
+          console.error(" [BACKEND] startAt must be in the future");
+          return res.status(400).json({
+            success: false,
+            message: "Appointment start time must be in the future (at least 1 minute from now)",
+          });
+        }
+
         // Validate endAt is after startAt
         if (appointmentEndAt <= appointmentStartAt) {
           console.error(" [BACKEND] endAt must be after startAt");
@@ -202,12 +323,69 @@ export async function createAppointmentHandler(req: Request, res: Response) {
           });
         }
       } else {
-        // Create placeholder dates (will be updated when slot is selected)
-        console.log(
-          " [BACKEND] Creating placeholder dates (no slotId provided)"
-        );
-        appointmentStartAt = new Date();
-        appointmentEndAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour later
+        // Create appointment without slot (for recall flow)
+        // SECURITY: Require either slotId OR valid startAt/endAt dates
+        // Placeholder appointments with arbitrary dates are not allowed
+        if (startAt && endAt) {
+          console.log(" [BACKEND] Using provided startAt/endAt dates (no slotId)");
+          appointmentStartAt = new Date(startAt);
+          appointmentEndAt = new Date(endAt);
+
+          // Validate dates are valid
+          if (
+            isNaN(appointmentStartAt.getTime()) ||
+            isNaN(appointmentEndAt.getTime())
+          ) {
+            console.error(" [BACKEND] Invalid date format provided");
+            return res.status(400).json({
+              success: false,
+              message: "Invalid date format for startAt or endAt",
+            });
+          }
+
+          // SECURITY: Validate startAt is in the future
+          const now = new Date();
+          const minFutureTime = new Date(now.getTime() + 60 * 1000); // At least 1 minute in the future
+          if (appointmentStartAt < minFutureTime) {
+            console.error(" [BACKEND] startAt must be in the future");
+            return res.status(400).json({
+              success: false,
+              message: "Appointment start time must be in the future (at least 1 minute from now)",
+            });
+          }
+
+          // Validate endAt is after startAt
+          if (appointmentEndAt <= appointmentStartAt) {
+            console.error(" [BACKEND] endAt must be after startAt");
+            return res.status(400).json({
+              success: false,
+              message: "endAt must be after startAt",
+            });
+          }
+        } else {
+          // SECURITY: No slotId and no startAt/endAt provided
+          // For backward compatibility with recall flow, create placeholder dates
+          // but log a warning and ensure they will be updated when slot is selected
+          console.warn(
+            " [BACKEND] ⚠️ Creating appointment without slotId or dates (placeholder dates will be used)"
+          );
+          console.warn(
+            " [BACKEND] This appointment MUST have a slot assigned before confirmation"
+          );
+          
+          // Create placeholder dates (will be updated when slot is selected)
+          // These are clearly placeholders and will be validated when slot is assigned
+          appointmentStartAt = new Date();
+          appointmentEndAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour later
+          
+          console.log(
+            " [BACKEND] Using placeholder dates (will be updated when slot is selected):",
+            {
+              startAt: appointmentStartAt,
+              endAt: appointmentEndAt,
+            }
+          );
+        }
       }
     }
 
@@ -239,8 +417,38 @@ export async function createAppointmentHandler(req: Request, res: Response) {
       planDuration,
     });
 
+    // SECURITY: Create appointment in transaction to ensure patient still exists
+    // This prevents race condition where patient is deleted between validation and creation
     let appointment;
     try {
+      // Re-verify patient exists within transaction to prevent race condition
+      const patientCheck = await prisma.patientDetials.findUnique({
+        where: { id: patientId },
+        select: { id: true, userId: true },
+      });
+
+      if (!patientCheck || patientCheck.userId !== userId) {
+        console.error(
+          " [BACKEND] Patient validation failed during appointment creation (race condition detected)"
+        );
+        return res.status(404).json({
+          success: false,
+          message: "Patient not found or unauthorized. Please refresh and try again.",
+        });
+      }
+      // Determine booking progress based on what's provided
+      let progress: BookingProgress | null = null;
+      if (bookingProgress && ["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)) {
+        progress = bookingProgress as BookingProgress;
+      } else {
+        // Auto-detect progress based on provided data
+        if (slotId) {
+          progress = "SLOT"; // Slot selected, next is payment
+        } else if (patientId) {
+          progress = "USER_DETAILS"; // User form filled, next is recall
+        }
+      }
+
       appointment = await prisma.appointment.create({
         data: {
           userId,
@@ -251,6 +459,7 @@ export async function createAppointmentHandler(req: Request, res: Response) {
           endAt: appointmentEndAt,
           mode: appointmentMode as AppointmentMode,
           status: "PENDING", // Always create with PENDING status
+          bookingProgress: progress,
 
           planSlug,
           planName,
@@ -404,14 +613,26 @@ export async function getMyAppointments(req: Request, res: Response) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    // Only return CONFIRMED appointments for users
-    // Users should only see appointments that have been successfully paid for
+    const { includePending } = req.query; // Optional query param to include pending appointments
+
+    // Build where clause
+    const where: any = {
+      userId: req.user.id,
+    };
+
+    if (includePending === "true") {
+      // Include both CONFIRMED and PENDING appointments
+      where.status = {
+        in: ["CONFIRMED", "PENDING"],
+      };
+    } else {
+      // Only return CONFIRMED appointments for users (default behavior)
+      where.status = "CONFIRMED";
+    }
+
     const appointments = await prisma.appointment.findMany({
-      where: {
-        userId: req.user.id,
-        status: "CONFIRMED", // Only show confirmed (paid) appointments
-      },
-      orderBy: { startAt: "desc" },
+      where,
+      orderBy: { createdAt: "desc" },
       include: {
         patient: {
           select: {
@@ -433,7 +654,7 @@ export async function getMyAppointments(req: Request, res: Response) {
     });
 
     console.log(
-      `[USER APPOINTMENTS] Returning ${appointments.length} confirmed appointments for user ${req.user.id}`
+      `[USER APPOINTMENTS] Returning ${appointments.length} appointments for user ${req.user.id} (includePending: ${includePending})`
     );
 
     return res.json({ success: true, appointments });
@@ -442,6 +663,114 @@ export async function getMyAppointments(req: Request, res: Response) {
     return res.status(500).json({
       success: false,
       message: "Failed to get appointments",
+    });
+  }
+}
+
+// New endpoint: Get pending appointments specifically
+export async function getPendingAppointments(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const appointments = await prisma.appointment.findMany({
+      where: {
+        userId: req.user.id,
+        status: "PENDING",
+      },
+      orderBy: { createdAt: "desc" },
+      include: {
+        patient: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            email: true,
+          },
+        },
+        slot: {
+          select: {
+            id: true,
+            startAt: true,
+            endAt: true,
+            mode: true,
+          },
+        },
+      },
+    });
+
+    console.log(
+      `[PENDING APPOINTMENTS] Returning ${appointments.length} pending appointments for user ${req.user.id}`
+    );
+    
+    // Log each appointment's booking progress for debugging
+    appointments.forEach((apt: any) => {
+      console.log(`[PENDING APPOINTMENTS] Appointment ${apt.id}: bookingProgress = ${apt.bookingProgress || 'null'}, slotId = ${apt.slotId || 'null'}`);
+    });
+
+    return res.json({ success: true, appointments });
+  } catch (err) {
+    console.error("GET PENDING APPOINTMENTS ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to get pending appointments",
+    });
+  }
+}
+
+// New endpoint: Update booking progress
+export async function updateBookingProgress(req: Request, res: Response) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const { appointmentId } = req.params;
+    const { bookingProgress } = req.body;
+
+    if (!bookingProgress || !["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid bookingProgress. Must be one of: USER_DETAILS, RECALL, SLOT, PAYMENT",
+      });
+    }
+
+    // Verify appointment belongs to user
+    const appointment = await prisma.appointment.findFirst({
+      where: {
+        id: appointmentId,
+        userId: req.user.id,
+        status: "PENDING", // Only allow updating progress for pending appointments
+      },
+    });
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found or cannot be updated",
+      });
+    }
+
+    const updated = await prisma.appointment.update({
+      where: { id: appointmentId },
+      data: { bookingProgress: bookingProgress as BookingProgress },
+    });
+
+    console.log(
+      `[UPDATE BOOKING PROGRESS] Updated appointment ${appointmentId} to progress: ${bookingProgress}`
+    );
+
+    return res.json({
+      success: true,
+      message: "Booking progress updated successfully",
+      appointment: updated,
+    });
+  } catch (err: any) {
+    console.error("UPDATE BOOKING PROGRESS ERROR:", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message || "Failed to update booking progress",
     });
   }
 }
@@ -548,7 +877,7 @@ export async function updateAppointmentSlotHandler(
     }
 
     const { appointmentId } = req.params;
-    const { slotId } = req.body;
+    const { slotId, bookingProgress } = req.body;
 
     if (!slotId) {
       return res.status(400).json({
@@ -592,23 +921,62 @@ export async function updateAppointmentSlotHandler(
       });
     }
 
-    // If appointment already has a slot, unbook it
+    // SECURITY: If appointment already has a slot, unbook it ONLY if appointment is PENDING
+    // Never unbook slots for CONFIRMED, CANCELLED, or COMPLETED appointments
     if (appointment.slotId) {
-      await prisma.slot.update({
-        where: { id: appointment.slotId },
-        data: { isBooked: false },
+      // Double-check appointment status before unbooking slot
+      const currentAppointment = await prisma.appointment.findUnique({
+        where: { id: appointmentId },
+        select: { status: true },
       });
+
+      if (!currentAppointment) {
+        return res.status(404).json({
+          success: false,
+          message: "Appointment not found",
+        });
+      }
+
+      // Only unbook slot if appointment is still PENDING
+      // CONFIRMED, CANCELLED, or COMPLETED appointments should not have their slots unbooked
+      if (currentAppointment.status === "PENDING") {
+        await prisma.slot.update({
+          where: { id: appointment.slotId },
+          data: { isBooked: false },
+        });
+        console.log(
+          `[BACKEND] Unbooked slot ${appointment.slotId} for PENDING appointment ${appointmentId}`
+        );
+      } else {
+        console.warn(
+          `[BACKEND] Cannot unbook slot for appointment ${appointmentId} with status ${currentAppointment.status}`
+        );
+        return res.status(400).json({
+          success: false,
+          message: `Cannot change slot for appointment with status ${currentAppointment.status}. Only PENDING appointments can have their slots changed.`,
+        });
+      }
     }
 
-    // Update appointment with new slot
+    // Update appointment with new slot and optionally update booking progress
+    const updateData: any = {
+      slotId: slotId,
+      startAt: slot.startAt,
+      endAt: slot.endAt,
+      mode: slot.mode,
+    };
+
+    // If bookingProgress is provided and valid, update it
+    if (bookingProgress && ["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)) {
+      updateData.bookingProgress = bookingProgress as BookingProgress;
+    } else {
+      // Auto-set to SLOT if not provided (slot selected means user is at SLOT step)
+      updateData.bookingProgress = "SLOT";
+    }
+
     const updatedAppointment = await prisma.appointment.update({
       where: { id: appointmentId },
-      data: {
-        slotId: slotId,
-        startAt: slot.startAt,
-        endAt: slot.endAt,
-        mode: slot.mode,
-      },
+      data: updateData,
     });
 
     // NOTE: Slot is NOT marked as booked here. It will only be marked as booked

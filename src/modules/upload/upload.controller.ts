@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import cloudinary from "../../util/cloudinary";
+import cloudinary, { generateSignedUrl } from "../../util/cloudinary";
 import prisma from "../../database/prismaclient";
 
 export const uploadImageToCloudinary = async (req: Request, res: Response) => {
@@ -13,13 +13,46 @@ export const uploadImageToCloudinary = async (req: Request, res: Response) => {
     const uploadedFiles = [];
 
     for (const file of files) {
+      // Additional security: Validate file size (redundant check after middleware)
+      const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+      if (file.size > MAX_FILE_SIZE) {
+        console.error(
+          `[UPLOAD] File ${file.originalname} exceeds size limit: ${file.size} bytes`
+        );
+        return res.status(400).json({
+          error: `File "${file.originalname}" exceeds maximum size of 10MB`,
+        });
+      }
+
+      // Additional security: Validate file is not empty
+      if (file.size === 0) {
+        console.error(`[UPLOAD] File ${file.originalname} is empty`);
+        return res.status(400).json({
+          error: `File "${file.originalname}" is empty`,
+        });
+      }
+
       const base64 = `data:${file.mimetype};base64,${file.buffer.toString(
         "base64"
       )}`;
 
+      // Upload to Cloudinary with security measures
+      // Security: Generate unique public_id with timestamp and random string to prevent guessing
+      const timestamp = Date.now();
+      const randomStr = Math.random().toString(36).substring(2, 15);
+      const uniqueId = `nutriwell_${timestamp}_${randomStr}`;
+
       const result = await cloudinary.uploader.upload(base64, {
         folder: "nutriwell_images",
         resource_type: "image",
+        // Security: Use unique public_id to prevent guessing attacks
+        public_id: uniqueId,
+        // Security: Add metadata for tracking and audit
+        context: {
+          uploaded_at: new Date().toISOString(),
+          uploaded_by: (req as any).user?.id || "unknown",
+          original_filename: file.originalname,
+        },
         transformation: [
           {
             quality: "auto:best",
@@ -31,9 +64,15 @@ export const uploadImageToCloudinary = async (req: Request, res: Response) => {
         ],
       });
 
+      // Generate signed URL for secure access
+      // Signed URLs include a signature parameter that prevents URL tampering
+      // Expires after 1 year (can be adjusted based on requirements)
+      // Note: Cloudinary signed URLs are validated server-side when accessed
+      const signedUrl = generateSignedUrl(result.public_id, 365 * 24 * 60 * 60);
+
       const saved = await prisma.file.create({
         data: {
-          url: result.secure_url,
+          url: signedUrl, // Store signed URL instead of public URL
           publicId: result.public_id,
           fileName: file.originalname,
           mimeType: file.mimetype,

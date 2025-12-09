@@ -11,17 +11,12 @@ import {
 } from "../../services/whatsapp.service";
 
 // Initialize Razorpay instance
+// Note: Environment variables are validated at startup in src/config/env.ts
+// If we reach here, RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are guaranteed to exist
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID!,
   key_secret: process.env.RAZORPAY_KEY_SECRET!,
 });
-
-// Validate Razorpay configuration
-if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-  console.error(
-    "[PAYMENT] ERROR: Razorpay keys not configured. Please set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env"
-  );
-}
 
 export function normalizeAppointmentMode(input: string): AppointmentMode {
   const v = (input || "").toLowerCase().trim();
@@ -53,14 +48,8 @@ export async function createOrderHandler(req: Request, res: Response) {
       });
     }
 
-    // Validate Razorpay configuration
-    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-      console.error("[PAYMENT] Razorpay not configured");
-      return res.status(500).json({
-        success: false,
-        error: "Payment gateway not configured. Please contact support.",
-      });
-    }
+    // Note: Razorpay configuration is validated at startup
+    // If we reach here, Razorpay is configured
 
     // Support both new flow (appointmentId) and old flow (slotId, patientId) for backward compatibility
     const { appointmentId, slotId, patientId, planSlug, appointmentMode } =
@@ -531,75 +520,128 @@ export async function verifyPaymentHandler(req: Request, res: Response) {
     }
 
     // Update appointment status in a transaction to prevent race conditions
-    await prisma.$transaction(async (tx) => {
-      // Double-check status hasn't changed
-      const currentAppt = await tx.appointment.findUnique({
-        where: { id: appointment.id },
-        select: { status: true, slotId: true },
-      });
+    await prisma.$transaction(
+      async (tx) => {
+        // Use raw query with FOR UPDATE to lock the row and prevent concurrent updates
+        // This ensures only one request can update the appointment at a time
+        // DATA INTEGRITY: Also check paymentStatus to prevent duplicate payment processing
+        const lockedAppt = await tx.$queryRaw<
+          Array<{
+            id: string;
+            status: string;
+            paymentStatus: string;
+            slotId: string | null;
+          }>
+        >`
+          SELECT id, status, "paymentStatus", "slotId"
+          FROM "Appointment"
+          WHERE id = ${appointment.id}
+          FOR UPDATE
+        `;
 
-      if (!currentAppt) {
-        throw new Error("Appointment not found");
-      }
-
-      if (currentAppt.status === "CONFIRMED") {
-        // Already confirmed, skip update
-        return;
-      }
-
-      // Update appointment to CONFIRMED and store payment details
-      // Note: paymentId field stores Razorpay Order ID (orderId)
-      //       notes field stores Razorpay Payment ID (paymentId)
-      await tx.appointment.update({
-        where: { id: appointment.id },
-        data: {
-          status: "CONFIRMED",
-          paymentStatus: "SUCCESS",
-          // paymentId field already contains orderId (set during order creation)
-          // Store Razorpay Payment ID in notes field
-          notes: paymentId, // Razorpay Payment ID (pay_xxxxx)
-        } as any,
-      });
-
-      console.log("==========================================");
-      console.log("[PAYMENT SUCCESS] Payment Verified and Stored:");
-      console.log("  Appointment ID:", appointment.id);
-      console.log("  Order ID (Razorpay Order ID):", orderId);
-      console.log("  Payment ID (Razorpay Payment ID):", paymentId);
-      console.log("  Payment Status: SUCCESS");
-      console.log("  Appointment Status: CONFIRMED");
-      console.log("==========================================");
-
-      // Mark slot as booked if slot exists
-      // This is critical: slot must be marked as booked when payment succeeds
-      if (currentAppt.slotId) {
-        try {
-          const updatedSlot = await tx.slot.update({
-            where: { id: currentAppt.slotId },
-            data: { isBooked: true },
-          });
-          console.log("==========================================");
-          console.log("[PAYMENT SUCCESS] ✅ Slot Marked as Booked:");
-          console.log("  Slot ID:", currentAppt.slotId);
-          console.log("  Slot isBooked:", updatedSlot.isBooked);
-          console.log("  Slot Start Time:", updatedSlot.startAt);
-          console.log("  Slot Mode:", updatedSlot.mode);
-          console.log("==========================================");
-        } catch (slotError: any) {
-          // Slot may already be booked (race condition) - log but don't fail
-          console.warn(
-            "[PAYMENT] Slot update failed (may already be booked):",
-            slotError.message
-          );
-          // Still log the slot ID for debugging
-          console.log("[PAYMENT] Attempted to book slot:", currentAppt.slotId);
+        if (!lockedAppt || lockedAppt.length === 0) {
+          throw new Error("Appointment not found");
         }
-      } else {
-        console.log(
-          "[PAYMENT] No slot ID found for appointment - skipping slot booking"
-        );
+
+        const apptStatus = lockedAppt[0].status;
+        const apptPaymentStatus = lockedAppt[0].paymentStatus;
+        const apptSlotId = lockedAppt[0].slotId;
+
+        // DATA INTEGRITY: Idempotency check - if already confirmed, return early
+        if (apptStatus === "CONFIRMED") {
+          console.log(
+            "[PAYMENT] Appointment already confirmed (race condition prevented)"
+          );
+          return;
+        }
+
+        // DATA INTEGRITY: Check payment status to prevent duplicate payment processing
+        if (apptPaymentStatus === "SUCCESS") {
+          console.warn(
+            "[PAYMENT] Payment already processed (paymentStatus is SUCCESS)"
+          );
+          throw new Error(
+            "Payment has already been processed for this appointment. Cannot process duplicate payment."
+          );
+        }
+
+        // DATA INTEGRITY: Additional validation - ensure appointment is still in PENDING status
+        // This prevents confirming cancelled or completed appointments
+        if (apptStatus !== "PENDING") {
+          throw new Error(
+            `Cannot confirm appointment in ${apptStatus} status. Expected PENDING. Payment verification aborted.`
+          );
+        }
+
+        // Update appointment to CONFIRMED and store payment details
+        // Note: paymentId field stores Razorpay Order ID (orderId)
+        //       notes field stores Razorpay Payment ID (paymentId)
+        // Clear bookingProgress since appointment is now confirmed (no longer pending)
+        await tx.appointment.update({
+          where: { id: appointment.id },
+          data: {
+            status: "CONFIRMED",
+            paymentStatus: "SUCCESS",
+            bookingProgress: null, // Clear booking progress - appointment is confirmed
+            // paymentId field already contains orderId (set during order creation)
+            // Store Razorpay Payment ID in notes field
+            notes: paymentId, // Razorpay Payment ID (pay_xxxxx)
+          } as any,
+        });
+
+        console.log("==========================================");
+        console.log("[PAYMENT SUCCESS] Payment Verified and Stored:");
+        console.log("  Appointment ID:", appointment.id);
+        console.log("  Order ID (Razorpay Order ID):", orderId);
+        console.log("  Payment ID (Razorpay Payment ID):", paymentId);
+        console.log("  Payment Status: SUCCESS");
+        console.log("  Appointment Status: CONFIRMED");
+        console.log("==========================================");
+
+        // Mark slot as booked if slot exists
+        // This is critical: slot must be marked as booked when payment succeeds
+        if (apptSlotId) {
+          try {
+            // Lock slot row to prevent concurrent bookings
+            await tx.$queryRaw`
+              SELECT id
+              FROM "Slot"
+              WHERE id = ${apptSlotId}
+              FOR UPDATE
+            `;
+
+            const updatedSlot = await tx.slot.update({
+              where: { id: apptSlotId },
+              data: { isBooked: true },
+            });
+            console.log("==========================================");
+            console.log("[PAYMENT SUCCESS] ✅ Slot Marked as Booked:");
+            console.log("  Slot ID:", apptSlotId);
+            console.log("  Slot isBooked:", updatedSlot.isBooked);
+            console.log("  Slot Start Time:", updatedSlot.startAt);
+            console.log("  Slot Mode:", updatedSlot.mode);
+            console.log("==========================================");
+          } catch (slotError: any) {
+            // Slot may already be booked (race condition) - log but don't fail
+            // This can happen if webhook processed payment before verifyPaymentHandler
+            console.warn(
+              "[PAYMENT] Slot update failed (may already be booked):",
+              slotError.message
+            );
+            // Still log the slot ID for debugging
+            console.log("[PAYMENT] Attempted to book slot:", apptSlotId);
+          }
+        } else {
+          console.log(
+            "[PAYMENT] No slot ID found for appointment - skipping slot booking"
+          );
+        }
+      },
+      {
+        timeout: 10000, // 10 second timeout
+        isolationLevel: "ReadCommitted", // Prevent dirty reads
       }
-    });
+    );
 
     console.log(
       "[PAYMENT] Appointment CONFIRMED via verify API:",
@@ -944,12 +986,355 @@ async function sendWhatsAppNotifications(
   }
 }
 
-// Webhook handler (kept for reference but not used in current flow)
+/**
+ * Razorpay Webhook Handler
+ * Processes payment.captured events with signature verification and race condition handling
+ */
 export async function razorpayWebhookHandler(req: Request, res: Response) {
-  // This is kept for future use but not actively used in the current payment flow
-  // The payment verification is handled via verifyPaymentHandler instead
-  return res.json({
-    success: true,
-    message: "Webhook received (not processed)",
-  });
+  try {
+    console.log("[WEBHOOK] Razorpay webhook received");
+
+    // Get raw body for signature verification
+    const rawBody = (req as any).rawBody;
+    if (!rawBody) {
+      console.error("[WEBHOOK] ❌ Raw body not found");
+      return res.status(400).json({
+        success: false,
+        error: "Raw body required for signature verification",
+      });
+    }
+
+    // Get webhook signature from headers
+    const webhookSignature = req.headers["x-razorpay-signature"] as string;
+    if (!webhookSignature) {
+      console.error("[WEBHOOK] ❌ Webhook signature header missing");
+      return res.status(400).json({
+        success: false,
+        error: "Webhook signature header missing",
+      });
+    }
+
+    // Get webhook secret from environment
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    if (!webhookSecret) {
+      console.error("[WEBHOOK] ❌ RAZORPAY_WEBHOOK_SECRET not configured");
+      return res.status(500).json({
+        success: false,
+        error: "Webhook secret not configured",
+      });
+    }
+
+    // Verify webhook signature using HMAC-SHA256
+    // Razorpay webhook signatures use HMAC-SHA256 of the raw body
+    let isValidSignature = false;
+    try {
+      const expectedSignature = crypto
+        .createHmac("sha256", webhookSecret)
+        .update(rawBody)
+        .digest("hex");
+
+      // Razorpay sends signature in format: sha256=<hash>
+      // Extract hash if signature includes prefix
+      const receivedSignature = webhookSignature.includes("sha256=")
+        ? webhookSignature.split("sha256=")[1]
+        : webhookSignature;
+
+      isValidSignature = crypto.timingSafeEqual(
+        Buffer.from(expectedSignature),
+        Buffer.from(receivedSignature)
+      );
+    } catch (signatureError: any) {
+      console.error(
+        "[WEBHOOK] ❌ Signature verification error:",
+        signatureError
+      );
+      return res.status(400).json({
+        success: false,
+        error: "Invalid webhook signature",
+      });
+    }
+
+    if (!isValidSignature) {
+      console.error("[WEBHOOK] ❌ Invalid webhook signature");
+      return res.status(400).json({
+        success: false,
+        error: "Invalid webhook signature",
+      });
+    }
+
+    console.log("[WEBHOOK] ✅ Signature verified successfully");
+
+    // Parse webhook payload
+    const webhookPayload = req.body;
+    if (!webhookPayload) {
+      console.error("[WEBHOOK] ❌ Webhook payload missing");
+      return res.status(400).json({
+        success: false,
+        error: "Webhook payload missing",
+      });
+    }
+
+    const eventType = webhookPayload.event;
+    const eventId = webhookPayload.id || webhookPayload.event_id;
+
+    console.log("[WEBHOOK] Event Details:", {
+      eventType,
+      eventId,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Check for idempotency - prevent processing same event twice
+    if (eventId) {
+      const existingEvent = await prisma.webhookEvent.findUnique({
+        where: { eventId },
+      });
+
+      if (existingEvent) {
+        console.log(
+          "[WEBHOOK] ⚠️ Event already processed (idempotency check):",
+          eventId
+        );
+        return res.json({
+          success: true,
+          message: "Event already processed",
+          eventId,
+        });
+      }
+    }
+
+    // Process payment.captured event
+    if (eventType === "payment.captured") {
+      console.log("[WEBHOOK] Processing payment.captured event");
+
+      const paymentEntity = webhookPayload.payload?.payment?.entity;
+      if (!paymentEntity) {
+        console.error("[WEBHOOK] ❌ Payment entity missing in payload");
+        return res.status(400).json({
+          success: false,
+          error: "Payment entity missing in webhook payload",
+        });
+      }
+
+      const orderId = paymentEntity.order_id;
+      const paymentId = paymentEntity.id;
+      const paymentStatus = paymentEntity.status;
+
+      console.log("[WEBHOOK] Payment Details:", {
+        orderId,
+        paymentId,
+        paymentStatus,
+        amount: paymentEntity.amount,
+        currency: paymentEntity.currency,
+      });
+
+      if (!orderId || !paymentId) {
+        console.error("[WEBHOOK] ❌ Missing orderId or paymentId");
+        return res.status(400).json({
+          success: false,
+          error: "Missing orderId or paymentId in webhook payload",
+        });
+      }
+
+      // Process payment capture in a transaction to handle race conditions
+      try {
+        await prisma.$transaction(
+          async (tx) => {
+            // Store webhook event for idempotency (before processing)
+            if (eventId) {
+              await tx.webhookEvent.create({
+                data: { eventId },
+              });
+            }
+
+            // Find appointment by payment order ID
+            const appointment = await tx.appointment.findFirst({
+              where: {
+                paymentId: orderId,
+              },
+              include: {
+                slot: true,
+                patient: {
+                  select: {
+                    id: true,
+                    name: true,
+                    phone: true,
+                    email: true,
+                  },
+                },
+                doctor: {
+                  select: {
+                    id: true,
+                    name: true,
+                    phone: true,
+                    email: true,
+                  },
+                },
+              },
+            });
+
+            if (!appointment) {
+              console.warn(
+                "[WEBHOOK] ⚠️ Appointment not found for order:",
+                orderId
+              );
+              // Don't fail webhook - appointment might be processed via verifyPaymentHandler
+              return;
+            }
+
+            // Lock appointment row to prevent concurrent updates
+            const lockedAppt = await tx.$queryRaw<
+              Array<{ id: string; status: string; slotId: string | null }>
+            >`
+              SELECT id, status, "slotId"
+              FROM "Appointment"
+              WHERE id = ${appointment.id}
+              FOR UPDATE
+            `;
+
+            if (!lockedAppt || lockedAppt.length === 0) {
+              throw new Error("Appointment not found during transaction");
+            }
+
+            const apptStatus = lockedAppt[0].status;
+            const apptSlotId = lockedAppt[0].slotId;
+
+            // Idempotency check: if already confirmed, return early
+            if (apptStatus === "CONFIRMED") {
+              console.log(
+                "[WEBHOOK] ⚠️ Appointment already confirmed (race condition prevented):",
+                appointment.id
+              );
+              return;
+            }
+
+            // Additional validation: ensure appointment is still in PENDING status
+            if (apptStatus !== "PENDING") {
+              console.warn(
+                `[WEBHOOK] ⚠️ Cannot confirm appointment in ${apptStatus} status. Expected PENDING.`
+              );
+              return;
+            }
+
+            // Update appointment to CONFIRMED
+            await tx.appointment.update({
+              where: { id: appointment.id },
+              data: {
+                status: "CONFIRMED",
+                paymentStatus: "SUCCESS",
+                bookingProgress: null,
+                notes: paymentId, // Store Razorpay Payment ID
+              } as any,
+            });
+
+            console.log("[WEBHOOK] ✅ Appointment confirmed:", appointment.id);
+
+            // Mark slot as booked if slot exists
+            if (apptSlotId) {
+              try {
+                // Lock slot row to prevent concurrent bookings
+                await tx.$queryRaw`
+                  SELECT id
+                  FROM "Slot"
+                  WHERE id = ${apptSlotId}
+                  FOR UPDATE
+                `;
+
+                await tx.slot.update({
+                  where: { id: apptSlotId },
+                  data: { isBooked: true },
+                });
+                console.log("[WEBHOOK] ✅ Slot marked as booked:", apptSlotId);
+              } catch (slotError: any) {
+                // Slot may already be booked (race condition) - log but don't fail
+                console.warn(
+                  "[WEBHOOK] ⚠️ Slot update failed (may already be booked):",
+                  slotError.message
+                );
+              }
+            }
+
+            // Send WhatsApp notifications (outside transaction to avoid blocking)
+            // Use setImmediate to ensure transaction completes first
+            setImmediate(async () => {
+              try {
+                await sendWhatsAppNotifications(
+                  appointment,
+                  orderId,
+                  paymentId
+                );
+                console.log(
+                  "[WEBHOOK] ✅ WhatsApp notifications sent for appointment:",
+                  appointment.id
+                );
+              } catch (whatsappError: any) {
+                console.error(
+                  "[WEBHOOK] ❌ WhatsApp notification failed (non-blocking):",
+                  whatsappError.message
+                );
+              }
+            });
+          },
+          {
+            timeout: 10000, // 10 second timeout
+            isolationLevel: "ReadCommitted", // Prevent dirty reads
+          }
+        );
+
+        console.log(
+          "[WEBHOOK] ✅ Payment captured event processed successfully"
+        );
+      } catch (transactionError: any) {
+        console.error("[WEBHOOK] ❌ Transaction error:", transactionError);
+        // If event was stored but processing failed, we still return success
+        // to prevent Razorpay from retrying (idempotency)
+        if (eventId) {
+          const eventExists = await prisma.webhookEvent.findUnique({
+            where: { eventId },
+          });
+          if (eventExists) {
+            console.log(
+              "[WEBHOOK] Event stored but processing failed - returning success for idempotency"
+            );
+            return res.json({
+              success: true,
+              message: "Event received but processing failed",
+              eventId,
+            });
+          }
+        }
+        throw transactionError;
+      }
+    } else {
+      console.log("[WEBHOOK] ⚠️ Unhandled event type:", eventType);
+      // Store event for idempotency even if we don't process it
+      if (eventId) {
+        try {
+          await prisma.webhookEvent.create({
+            data: { eventId },
+          });
+        } catch (e) {
+          // Event might already exist, ignore
+        }
+      }
+    }
+
+    // Return success immediately to acknowledge webhook receipt
+    return res.json({
+      success: true,
+      message: "Webhook processed successfully",
+      eventId,
+      eventType,
+    });
+  } catch (err: any) {
+    console.error("[WEBHOOK] ❌ Webhook handler error:", {
+      message: err.message,
+      stack: err.stack,
+    });
+
+    // Return 500 to allow Razorpay to retry
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error processing webhook",
+    });
+  }
 }

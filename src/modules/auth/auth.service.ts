@@ -3,59 +3,79 @@ import crypto from "crypto";
 import { hashOtp, validateOtp, isOtpExpired } from "./utils/validateOtp";
 import { generateToken } from "./utils/token";
 import { AppError } from "../../util/AppError";
+import {
+  normalizePhoneNumber,
+  arePhoneNumbersEqual,
+} from "../../utils/phoneNormalizer";
 
 export class AuthService {
   /**
-   * Normalize phone number - remove country code if present, keep only digits
-   * Handles formats like: "916260440241", "6260440241", "+916260440241"
+   * Normalize phone number using centralized utility
+   * Phone normalization is now handled at database level via Prisma middleware
+   * This method is kept for backward compatibility and search operations
    */
   private normalizePhone(phone: string): string {
-    // Remove all non-digit characters
-    let digits = phone.replace(/\D/g, "");
-
-    // If starts with country code 91 and has 12 digits, remove it
-    if (digits.startsWith("91") && digits.length === 12) {
-      digits = digits.substring(2);
+    try {
+      // Use centralized normalization utility
+      return normalizePhoneNumber(phone);
+    } catch (error: any) {
+      // Fallback to old normalization for search compatibility
+      let digits = phone.replace(/\D/g, "");
+      if (digits.startsWith("91") && digits.length === 12) {
+        return digits; // Keep full number with country code
+      }
+      if (digits.length === 10) {
+        return `91${digits}`;
+      }
+      return digits;
     }
-
-    return digits;
   }
 
   private async findOwnerByPhone(phone: string) {
-    // Normalize the phone number
-    const normalizedPhone = this.normalizePhone(phone);
+    // Normalize the phone number (database will normalize on create/update)
+    // For search, we need to try both normalized and original formats
+    // because older records might not be normalized yet
+    let normalizedPhone: string;
+    let originalPhone: string;
 
-    // Also try with country code
-    const phoneWithCountryCode = normalizedPhone.startsWith("91")
-      ? normalizedPhone
-      : `91${normalizedPhone}`;
+    try {
+      normalizedPhone = normalizePhoneNumber(phone);
+    } catch (error: any) {
+      // If normalization fails, try original format
+      normalizedPhone = phone.replace(/\D/g, "");
+      if (normalizedPhone.length === 10) {
+        normalizedPhone = `91${normalizedPhone}`;
+      }
+    }
+
+    // Also try original format (10 digits without country code)
+    originalPhone = phone.replace(/\D/g, "");
+    const alternativePhone = originalPhone.length === 10 ? originalPhone : null;
 
     console.log("[AUTH] Searching for owner with phone:", {
       original: phone,
       normalized: normalizedPhone,
-      withCountryCode: phoneWithCountryCode,
+      alternative: alternativePhone,
     });
 
-    // Try to find user with normalized phone
+    // Build search conditions - try both normalized and alternative formats
+    const phoneConditions: any[] = [{ phone: normalizedPhone }];
+    if (alternativePhone && alternativePhone !== normalizedPhone) {
+      phoneConditions.push({ phone: alternativePhone });
+    }
+
+    // Try to find user with either phone format
     const user = await prisma.user.findFirst({
       where: {
-        OR: [
-          { phone: normalizedPhone },
-          { phone: phoneWithCountryCode },
-          { phone: phone }, // Also try original format
-        ],
+        OR: phoneConditions,
       },
       select: { id: true, name: true, phone: true },
     });
 
-    // Try to find admin with normalized phone
+    // Try to find admin with either phone format
     const admin = await prisma.admin.findFirst({
       where: {
-        OR: [
-          { phone: normalizedPhone },
-          { phone: phoneWithCountryCode },
-          { phone: phone }, // Also try original format
-        ],
+        OR: phoneConditions,
       },
       select: { id: true, name: true, phone: true },
     });
@@ -79,8 +99,19 @@ export class AuthService {
 
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
-    await prisma.oTP.create({
-      data: { phone, code: hashed, expiresAt },
+    // Use transaction with atomic operation to prevent race conditions
+    // Delete any existing OTPs for this phone first, then create new one
+    // This ensures only one active OTP per phone at a time
+    await prisma.$transaction(async (tx) => {
+      // Delete existing OTPs for this phone (atomic operation)
+      await tx.oTP.deleteMany({
+        where: { phone },
+      });
+
+      // Create new OTP (atomic operation)
+      await tx.oTP.create({
+        data: { phone, code: hashed, expiresAt },
+      });
     });
 
     console.log("OTP:", otp);

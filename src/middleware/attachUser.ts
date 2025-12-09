@@ -26,11 +26,28 @@ export async function attachUser(
 
     if (decoded) {
       req.user = { id: decoded.id, role: decoded.role };
+    } else {
+      // Log failed token verification for monitoring
+      console.warn("[AUTH] Token verification failed:", {
+        hasToken: !!token,
+        tokenLength: token.length,
+        timestamp: new Date().toISOString(),
+        path: req.path,
+        method: req.method,
+      });
     }
 
     return next();
-  } catch (err) {
-    // Silently continue if token verification fails
+  } catch (err: any) {
+    // Log token verification errors for monitoring
+    console.error("[AUTH] Token verification error:", {
+      error: err.message,
+      stack: err.stack,
+      path: req.path,
+      method: req.method,
+      timestamp: new Date().toISOString(),
+    });
+    // Continue without user - let requireAuth middleware handle authorization
     return next();
   }
 }
