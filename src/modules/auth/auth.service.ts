@@ -167,7 +167,7 @@ export class AuthService {
 
   /* ---------------- DUAL CHANNEL OTP (NEW) ---------------- */
   private async createDualChannelOtp(phone: string, email: string) {
-    // blocked by global rate limit? maybe not per user 
+    // blocked by global rate limit? maybe not per user
     // Check if OTP was sent recently (last 60s) to either phone or email
     const recentOtp = await prisma.oTP.findFirst({
       where: {
@@ -196,22 +196,22 @@ export class AuthService {
 
     // Transaction to clear old OTPs and create new ones
     await prisma.$transaction(async (tx) => {
-        // Delete existing
-        await tx.oTP.deleteMany({
-            where: {
-                OR: [{ phone }, { email }]
-            }
-        });
+      // Delete existing
+      await tx.oTP.deleteMany({
+        where: {
+          OR: [{ phone }, { email }],
+        },
+      });
 
-        // Create for Phone
-        await tx.oTP.create({
-            data: { phone, code: hashed, expiresAt }
-        });
+      // Create for Phone
+      await tx.oTP.create({
+        data: { phone, code: hashed, expiresAt },
+      });
 
-        // Create for Email
-         await tx.oTP.create({
-            data: { email, code: hashed, expiresAt }
-        });
+      // Create for Email
+      await tx.oTP.create({
+        data: { email, code: hashed, expiresAt },
+      });
     });
 
     // Send Parallel
@@ -220,218 +220,284 @@ export class AuthService {
 
     // 1. Send WhatsApp
     try {
-        const { sendOtpMessage } = await import("../../services/whatsapp.service");
-        const sendResult = await sendOtpMessage(phone, otp);
-        if (sendResult.success) phoneSent = true;
-        else console.error("[AUTH] WhatsApp Send Failed:", sendResult.error);
+      const { sendOtpMessage } = await import(
+        "../../services/whatsapp.service"
+      );
+      const sendResult = await sendOtpMessage(phone, otp);
+      if (sendResult.success) phoneSent = true;
+      else console.error("[AUTH] WhatsApp Send Failed:", sendResult.error);
     } catch (e) {
-        console.error("[AUTH] WhatsApp Exception:", e);
+      console.error("[AUTH] WhatsApp Exception:", e);
     }
 
     // 2. Send Email
     try {
-        const emailResult = await sendEmailOtp(email, otp);
-        if (emailResult) emailSent = true;
-        else console.error("[AUTH] Email Send Failed");
+      const emailResult = await sendEmailOtp(email, otp);
+      if (emailResult) emailSent = true;
+      else console.error("[AUTH] Email Send Failed");
     } catch (e) {
-        console.error("[AUTH] Email Exception:", e);
+      console.error("[AUTH] Email Exception:", e);
     }
 
-    console.log(`[AUTH] Dual OTP Sent. Phone: ${phoneSent}, Email: ${emailSent}. Code: ${otp}`);
+    console.log(
+      `[AUTH] Dual OTP Sent. Phone: ${phoneSent}, Email: ${emailSent}. Code: ${otp}`
+    );
     return { otp, phoneSent, emailSent };
   }
 
   /* ---------------- UNIFIED SIGNUP (NEW) ---------------- */
   async signupInitiate(name: string, phone: string, email: string) {
-      // Check if user exists with phone or email
-      const existingUser = await prisma.user.findFirst({
-        where: {
-            OR: [
-                { phone: phone }, // Expect normalized phone from controller/input
-                { email: email.toLowerCase() }
-            ]
-        }
-      });
-      
-      if (existingUser) {
-          throw new AppError("Account already exists with this phone or email. Please login.", 409);
-      }
+    // Check if user exists with phone or email
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { phone: phone }, // Expect normalized phone from controller/input
+          { email: email.toLowerCase() },
+        ],
+      },
+    });
 
-      await this.createDualChannelOtp(phone, email);
-      return { message: "OTP sent to your email and phone." };
+    if (existingUser) {
+      throw new AppError(
+        "Account already exists with this phone or email. Please login.",
+        409
+      );
+    }
+
+    await this.createDualChannelOtp(phone, email);
+    return { message: "OTP sent to your email and phone." };
   }
 
-  async signupVerify(name: string, phone: string, email: string, password: string, otp: string) {
-      // Re-check uniqueness (race condition)
-      const existingUser = await prisma.user.findFirst({
-        where: {
-             OR: [
-                { phone: phone },
-                { email: email.toLowerCase() }
-            ]
-        }
-      });
-      if (existingUser) throw new AppError("Account already exists.", 409);
+  async signupVerify(
+    name: string,
+    phone: string,
+    email: string,
+    password: string,
+    otp: string
+  ) {
+    // Re-check uniqueness (race condition)
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        OR: [{ phone: phone }, { email: email.toLowerCase() }],
+      },
+    });
+    if (existingUser) throw new AppError("Account already exists.", 409);
 
-      // Verify OTP against Phone OR Email record
-      const foundOtp = await prisma.oTP.findFirst({
-          where: {
-              OR: [
-                  { phone: phone },
-                  { email: email }
-              ]
-          },
-          orderBy: { createdAt: "desc" }
-      });
+    // Verify OTP against Phone OR Email record
+    const foundOtp = await prisma.oTP.findFirst({
+      where: {
+        OR: [{ phone: phone }, { email: email }],
+      },
+      orderBy: { createdAt: "desc" },
+    });
 
-      if (!foundOtp) throw new AppError("OTP not found.", 404);
-      if (isOtpExpired(foundOtp.expiresAt)) throw new AppError("OTP expired.", 410);
-      
-      const match = await validateOtp(otp, foundOtp.code);
-      if (!match) throw new AppError("Invalid OTP.", 401);
+    if (!foundOtp) throw new AppError("OTP not found.", 404);
+    if (isOtpExpired(foundOtp.expiresAt))
+      throw new AppError("OTP expired.", 410);
 
-      // Verify success - delete used OTPs
-       await prisma.oTP.deleteMany({
-        where: {
-             OR: [
-                  { phone: phone },
-                  { email: email }
-              ]
-        }
-      });
+    const match = await validateOtp(otp, foundOtp.code);
+    if (!match) throw new AppError("Invalid OTP.", 401);
 
-      // Create User
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const user = await prisma.user.create({
-          data: {
-              name,
-              phone,
-              email: email.toLowerCase(),
-              password: hashedPassword,
-              role: "USER"
-          }
-      });
+    // Verify success - delete used OTPs
+    await prisma.oTP.deleteMany({
+      where: {
+        OR: [{ phone: phone }, { email: email }],
+      },
+    });
 
-      const token = generateToken(user.id, "USER");
-      
-      return {
-          message: "Account created successfully.",
-          user: { id: user.id, name: user.name, phone: user.phone, email: user.email, role: "USER" },
-          token
-      };
+    // Create User
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = await prisma.user.create({
+      data: {
+        name,
+        phone,
+        email: email.toLowerCase(),
+        password: hashedPassword,
+        role: "USER",
+      },
+    });
+
+    const token = generateToken(user.id, "USER");
+
+    return {
+      message: "Account created successfully.",
+      user: {
+        id: user.id,
+        name: user.name,
+        phone: user.phone,
+        email: user.email,
+        role: "USER",
+      },
+      token,
+    };
   }
 
   /* ---------------- UNIFIED LOGIN (NEW) ---------------- */
   async loginInitiate(phone: string, email: string) {
-      // We do NOT block if user doesn't exist (security/enumeration), 
-      // BUT for a "Unified Login" where user claims to have both, we usually want to check.
-      // However, requirements say: "Login form should accept: Phone number and Email".
-      // "Attempt to send OTP to phone ... ALSO send OTP to email".
-      // We should just proceed to send OTPs to whatever is provided.
-      // But we need to know valid destinations. 
-      // If user enters Phone X and Email Y.
-      // If X belongs to User A, and Y belongs to User B -> Collision?
-      // Requirement: "Login form should accept: Phone number and Email". 
-      // Implies user inputs BOTH? Or "Phone OR Email"?
-      // User Request: "Login form should accept: Phone number and Email" (AND).
-      // "final behaviour: same behaviour with the login take phone and email as credentials and verify both with the otp send"
-      // So User inputs BOTH.
-      // We should check if they match THE SAME user?
-      // If I enter my phone and YOUR email, I shouldn't be able to get an OTP to your email.
-      // Security: Only send to email if it matches the phone account?
-      // OR: The user is claiming "I own both".
-      // If we just send to both, and I have access to ONE, I can log in?
-      // "OTP verification succeeds if ANY valid OTP matches".
-      // Risk: I know your phone number. I enter My Email + Your Phone. 
-      // I get OTP on My Email. I verify. I log in as... WHO?
-      // I must log in as the user associated with the verified OTP.
-      // If I verify Email OTP -> I log in as owner of Email.
-      /// If I verify Phone OTP -> I log in as owner of Phone.
-      // So if I enter My Email + Your Phone.
-      // DB has User A (Your Phone), User B (My Email).
-      // I get OTP on My Email. I verify. I log in as User B.
-      // This seems safe. 
-      // BUT what if User B doesn't exist? (Login flow).
-      // If User B (My Email) doesn't exist, I can't log in.
-      // Exception: "Account Linking".
-      // "take email and phone number for one account... Ensure phone and email uniqueness remains enforced"
-      // Wait. "on sign up send one otp to both... login take phone and email... and verify both"
-      
-      // Let's implement `loginInitiate` to blindly send to both.
-      // `loginVerify` will determine who to log in as based on which OTP is valid.
-      // Actually, we must ensure they belong to the SAME user if both exist?
-      // "One form for login... take phone and email".
-      
-      await this.createDualChannelOtp(phone, email);
-      return { message: "OTP sent to your email and phone." };
+    // Normalize phone number first
+    let normalizedPhone: string;
+    try {
+      normalizedPhone = this.normalizePhone(phone);
+    } catch (error: any) {
+      throw new AppError(
+        "Invalid phone number format. Please enter a valid phone number.",
+        400
+      );
+    }
+
+    // Normalize email
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Check if phone exists in User or Admin tables
+    const userByPhone = await prisma.user.findFirst({
+      where: { phone: normalizedPhone },
+      select: { id: true, phone: true, email: true },
+    });
+
+    const adminByPhone = await prisma.admin.findFirst({
+      where: { phone: normalizedPhone },
+      select: { id: true, phone: true, email: true },
+    });
+
+    // Check if email exists in User or Admin tables
+    const userByEmail = await prisma.user.findFirst({
+      where: { email: normalizedEmail },
+      select: { id: true, phone: true, email: true },
+    });
+
+    const adminByEmail = await prisma.admin.findFirst({
+      where: { email: normalizedEmail },
+      select: { id: true, phone: true, email: true },
+    });
+
+    // Determine if phone and email belong to accounts and check if they match
+    // Case 1: Both phone and email exist in User table
+    if (userByPhone && userByEmail) {
+      if (userByPhone.id !== userByEmail.id) {
+        throw new AppError(
+          "Phone number and email do not belong to the same account. Please verify your credentials.",
+          400
+        );
+      }
+      // They belong to the same user - proceed with OTP sending
+    }
+    // Case 2: Both phone and email exist in Admin table
+    else if (adminByPhone && adminByEmail) {
+      if (adminByPhone.id !== adminByEmail.id) {
+        throw new AppError(
+          "Phone number and email do not belong to the same account. Please verify your credentials.",
+          400
+        );
+      }
+      // They belong to the same admin - proceed with OTP sending
+    }
+    // Case 3: Phone exists in User, email exists in Admin (or vice versa) - mismatch
+    else if ((userByPhone || adminByPhone) && (userByEmail || adminByEmail)) {
+      throw new AppError(
+        "Phone number and email do not belong to the same account. Please verify your credentials.",
+        400
+      );
+    }
+    // Case 4: Phone exists but email doesn't exist in any table
+    else if (userByPhone || adminByPhone) {
+      const phoneOwner = userByPhone || adminByPhone;
+      // Check if the phone owner's email matches the provided email
+      // If phone owner has an email, it must match
+      if (phoneOwner.email) {
+        const ownerEmail = phoneOwner.email.toLowerCase().trim();
+        if (ownerEmail !== normalizedEmail) {
+          throw new AppError(
+            "The provided email does not match the phone number's account.",
+            400
+          );
+        }
+      }
+      // If phone owner has no email (phone-only account), allow - email will be used for linking
+    }
+    // Case 5: Email exists but phone doesn't exist in any table
+    else if (userByEmail || adminByEmail) {
+      const emailOwner = userByEmail || adminByEmail;
+      // Check if the email owner's phone matches the provided phone
+      // If email owner has a phone, it must match
+      if (emailOwner.phone) {
+        const ownerPhone = this.normalizePhone(emailOwner.phone);
+        if (ownerPhone !== normalizedPhone) {
+          throw new AppError(
+            "The provided phone number does not match the email's account.",
+            400
+          );
+        }
+      }
+      // If email owner has no phone (email-only account), allow - phone will be used for linking
+    }
+    // Case 6: Neither phone nor email exists - allow OTP sending for account linking flow
+
+    // Send OTP to both channels
+    await this.createDualChannelOtp(normalizedPhone, normalizedEmail);
+    return { message: "OTP sent to your email and phone." };
   }
 
   async loginVerify(phone: string, email: string, otp: string) {
-      // 1. Find the OTP record
-       const foundOtp = await prisma.oTP.findFirst({
-          where: {
-              OR: [
-                  { phone: phone },
-                  { email: email }
-              ]
-          },
-          orderBy: { createdAt: "desc" }
-      });
+    // 1. Find the OTP record
+    const foundOtp = await prisma.oTP.findFirst({
+      where: {
+        OR: [{ phone: phone }, { email: email }],
+      },
+      orderBy: { createdAt: "desc" },
+    });
 
-      if (!foundOtp) throw new AppError("OTP not found.", 404);
-      if (isOtpExpired(foundOtp.expiresAt)) throw new AppError("OTP expired.", 410);
-      
-      const match = await validateOtp(otp, foundOtp.code);
-      if (!match) throw new AppError("Invalid OTP.", 401);
+    if (!foundOtp) throw new AppError("OTP not found.", 404);
+    if (isOtpExpired(foundOtp.expiresAt))
+      throw new AppError("OTP expired.", 410);
 
-      // 2. Identify User
-      // If foundOtp was for Phone -> find User by Phone
-      // If foundOtp was for Email -> find User by Email
-      let user = null;
-      let role = "USER"; // Default
+    const match = await validateOtp(otp, foundOtp.code);
+    if (!match) throw new AppError("Invalid OTP.", 401);
 
-      if (foundOtp.phone) {
-          const owner = await this.findOwnerByPhone(foundOtp.phone);
-          if (owner) {
-              user = owner;
-              role = owner.role;
-          }
-      } else if (foundOtp.email) {
-          user = await prisma.user.findUnique({ where: { email: foundOtp.email } });
-          // Admin?
-          if(!user) {
-             const admin = await prisma.admin.findUnique({ where: { email: foundOtp.email } });
-             if(admin) {
-                 user = admin;
-                 role = "ADMIN";
-             }
-          }
+    // 2. Identify User
+    // If foundOtp was for Phone -> find User by Phone
+    // If foundOtp was for Email -> find User by Email
+    let user = null;
+    let role = "USER"; // Default
+
+    if (foundOtp.phone) {
+      const owner = await this.findOwnerByPhone(foundOtp.phone);
+      if (owner) {
+        user = owner;
+        role = owner.role;
       }
-
-      // Cleanup
-      await prisma.oTP.deleteMany({
-        where: {
-             OR: [
-                  { phone: phone },
-                  { email: email }
-              ]
-        }
-      });
-
+    } else if (foundOtp.email) {
+      user = await prisma.user.findUnique({ where: { email: foundOtp.email } });
+      // Admin?
       if (!user) {
-          return { userNotFound: true, message: "No account found." };
+        const admin = await prisma.admin.findUnique({
+          where: { email: foundOtp.email },
+        });
+        if (admin) {
+          user = admin;
+          role = "ADMIN";
+        }
       }
+    }
 
-      const token = generateToken(user.id, role);
+    // Cleanup
+    await prisma.oTP.deleteMany({
+      where: {
+        OR: [{ phone: phone }, { email: email }],
+      },
+    });
 
-      return {
-          message: "Logged in successfully.",
-          user: { ...user, role },
-          token
-      };
+    if (!user) {
+      return { userNotFound: true, message: "No account found." };
+    }
+
+    const token = generateToken(user.id, role);
+
+    return {
+      message: "Logged in successfully.",
+      user: { ...user, role },
+      token,
+    };
   }
-
-
 
   /* ---------------- REGISTER OTP ---------------- */
   async sendRegisterOtp(name: string, phone: string) {
@@ -499,7 +565,39 @@ export class AuthService {
   async sendLoginOtp(phone: string) {
     console.log("[AUTH] sendLoginOtp called with phone:", phone);
 
-    const owner = await this.findOwnerByPhone(phone);
+    // Normalize phone number first to ensure consistency
+    let normalizedPhone: string;
+    try {
+      normalizedPhone = this.normalizePhone(phone);
+    } catch (error: any) {
+      throw new AppError(
+        "Invalid phone number format. Please enter a valid phone number.",
+        400
+      );
+    }
+
+    // Validate phone number uniqueness - check if it exists in User or Admin tables
+    // This ensures we don't have duplicate phone numbers across tables
+    const userWithPhone = await prisma.user.findFirst({
+      where: { phone: normalizedPhone },
+      select: { id: true, phone: true },
+    });
+
+    const adminWithPhone = await prisma.admin.findFirst({
+      where: { phone: normalizedPhone },
+      select: { id: true, phone: true },
+    });
+
+    // If phone exists in both tables (shouldn't happen, but check for data integrity)
+    if (userWithPhone && adminWithPhone) {
+      throw new AppError(
+        "This phone number is associated with multiple accounts. Please contact support.",
+        409
+      );
+    }
+
+    // Find owner to determine role (but allow OTP sending even if not found)
+    const owner = await this.findOwnerByPhone(normalizedPhone);
 
     console.log(
       "[AUTH] Owner found:",
@@ -516,7 +614,8 @@ export class AuthService {
     // Allow OTP sending even if user doesn't exist
     // We'll check user existence during OTP verification instead
     // This prevents user enumeration and allows linking phone flow
-    await this.createOtp(phone);
+    // Use normalized phone number for OTP creation
+    await this.createOtp(normalizedPhone);
 
     return {
       message: "OTP sent successfully.",
