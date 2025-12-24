@@ -21,6 +21,10 @@ import {
   verifyLinkPhoneEmailOtpSchema,
   sendAddEmailOtpSchema,
   verifyAddEmailOtpSchema,
+  signupInitiateSchema,
+  signupCompleteSchema,
+  loginInitiateSchema,
+  loginCompleteSchema
 } from "./auth.schema";
 
 const authRoutes = Router();
@@ -54,7 +58,36 @@ authRoutes.post(
   authController.verifyLoginOtp.bind(authController)
 );
 
-/* ---------------- PASSWORD-BASED AUTH (ACTIVE) ---------------- */
+/* ---------------- UNIFIED AUTH ROUTES (NEW) ---------------- */
+authRoutes.post(
+  "/signup/initiate",
+  authLimiter,
+  validateBody(signupInitiateSchema),
+  authController.signupInitiate.bind(authController)
+);
+
+authRoutes.post(
+  "/signup/complete",
+  authLimiter,
+  validateBody(signupCompleteSchema),
+  authController.signupComplete.bind(authController)
+);
+
+authRoutes.post(
+  "/login/initiate",
+  authLimiter,
+  validateBody(loginInitiateSchema),
+  authController.loginInitiate.bind(authController)
+);
+
+authRoutes.post(
+  "/login/complete",
+  authLimiter,
+  validateBody(loginCompleteSchema),
+  authController.loginComplete.bind(authController)
+);
+
+/* ---------------- PASSWORD-BASED AUTH (LEGACY - KEEPING FOR BACKWARD COMPAT IF NEEDED) ---------------- */
 authRoutes.post(
   "/signup",
   authLimiter, // Rate limit: 20 requests per 15 min

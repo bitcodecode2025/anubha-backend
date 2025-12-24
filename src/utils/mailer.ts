@@ -260,18 +260,18 @@ export async function sendEmailOtp(to: string, otp: string): Promise<boolean> {
     const mailOptions = {
       from: `"Anubha Nutrition Clinic" <${EMAIL_USER}>`,
       to: to,
-      subject: "Link Your Phone Number - Verification Code",
+      subject: "Verify Your Account - Verification Code",
       html: `
         <!DOCTYPE html>
         <html>
           <head>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Link Your Phone Number</title>
+            <title>Verify Your Account</title>
           </head>
           <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
             <div style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
-              <h1 style="color: white; margin: 0; font-size: 24px;">Link Your Phone Number</h1>
+              <h1 style="color: white; margin: 0; font-size: 24px;">Verify Your Account</h1>
             </div>
             
             <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 10px 10px;">
@@ -280,7 +280,7 @@ export async function sendEmailOtp(to: string, otp: string): Promise<boolean> {
               </p>
               
               <p style="font-size: 16px; margin-bottom: 20px;">
-                You requested to link a phone number to your Anubha Nutrition Clinic account. Please use the verification code below to complete the process.
+                You requested to verify your account with Anubha Nutrition Clinic. Please use the verification code below to complete the process.
               </p>
               
               <div style="text-align: center; margin: 30px 0;">
@@ -299,7 +299,7 @@ export async function sendEmailOtp(to: string, otp: string): Promise<boolean> {
               </div>
               
               <p style="font-size: 14px; color: #6b7280; margin-top: 30px;">
-                If you did not request to link a phone number, please ignore this email. Your account remains secure.
+                If you did not request this verification code, please ignore this email. Your account remains secure.
               </p>
               
               <p style="font-size: 14px; color: #6b7280; margin-top: 20px;">

@@ -135,3 +135,32 @@ export const verifyAddEmailOtpSchema = z.object({
   email: z.string().trim().email("Invalid email address"),
   otp: otpSchema,
 });
+
+/* ---------------- UNIFIED AUTH SCHEMAS (NEW) ---------------- */
+export const signupInitiateSchema = z.object({
+  name: nameSchema,
+  phone: phoneSchema,
+  email: z.string().trim().email("Invalid email address"),
+});
+
+export const signupCompleteSchema = z.object({
+  name: nameSchema,
+  phone: phoneSchema,
+  email: z.string().trim().email("Invalid email address"),
+  password: z
+    .string()
+    .min(6, "Password must be at least 6 characters long")
+    .max(100, "Password must be less than 100 characters"),
+  otp: otpSchema,
+});
+
+export const loginInitiateSchema = z.object({
+    phone: phoneSchema,
+    email: z.string().trim().email("Invalid email address"),
+});
+
+export const loginCompleteSchema = z.object({
+    phone: phoneSchema,
+    email: z.string().trim().email("Invalid email address"),
+    otp: otpSchema,
+});

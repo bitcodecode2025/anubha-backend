@@ -34,11 +34,14 @@ model OTP {
   code      String
   expiresAt DateTime
   createdAt DateTime @default(now())
-  phone     String
+  phone     String?
+  email     String?
 
   @@index([phone])
+  @@index([email])
   @@index([expiresAt])
   @@index([phone, expiresAt])
+  @@index([email, expiresAt])
 }
 
 model Testimonial {

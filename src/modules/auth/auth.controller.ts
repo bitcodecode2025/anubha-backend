@@ -659,6 +659,84 @@ export class AuthController {
       });
     }
   }
+
+  /* ---------------- UNIFIED SIGNUP (NEW) ---------------- */
+  async signupInitiate(req: Request, res: Response) {
+      try {
+          const { name, phone, email } = req.body;
+          if (!name || !phone || !email) {
+              return res.status(400).json({ success: false, message: "Name, phone, and email are required." });
+          }
+          const response = await authService.signupInitiate(name, phone, email);
+          return res.status(200).json({ success: true, ...response });
+      } catch (error: any) {
+          return res.status(error.statusCode || 400).json({ success: false, message: error.message });
+      }
+  }
+
+  async signupComplete(req: Request, res: Response) {
+      try {
+          const { name, phone, email, password, otp } = req.body;
+          // Validations
+           if (!name || !phone || !email || !password || !otp) {
+              return res.status(400).json({ success: false, message: "All fields are required." });
+          }
+
+          const response = await authService.signupVerify(name, phone, email, password, otp);
+          res.cookie("auth_token", response.token, getAuthTokenCookieOptions());
+          
+          return res.status(201).json({
+              success: true,
+              message: response.message,
+              user: response.user
+          });
+      } catch (error: any) {
+           return res.status(error.statusCode || 400).json({ success: false, message: error.message });
+      }
+  }
+
+  /* ---------------- UNIFIED LOGIN (NEW) ---------------- */
+   async loginInitiate(req: Request, res: Response) {
+      try {
+          const { phone, email } = req.body;
+           if (!phone || !email) {
+              return res.status(400).json({ success: false, message: "Phone and email are required." });
+          }
+          const response = await authService.loginInitiate(phone, email);
+          return res.status(200).json({ success: true, ...response });
+      } catch (error: any) {
+          return res.status(error.statusCode || 400).json({ success: false, message: error.message });
+      }
+  }
+
+  async loginComplete(req: Request, res: Response) {
+      try {
+          const { phone, email, otp } = req.body;
+          if (!phone || !email || !otp) {
+              return res.status(400).json({ success: false, message: "Phone, email, and OTP are required." });
+          }
+
+          const response = await authService.loginVerify(phone, email, otp);
+           if ((response as any).userNotFound) {
+               // Should not happen easily in this flow unless User explicitly enters wrong details
+               // But if it does, we handle it
+                return res.status(200).json({
+                  success: true,
+                  userNotFound: true,
+                  message: "No account found matching these credentials."
+                });
+           }
+
+          res.cookie("auth_token", response.token, getAuthTokenCookieOptions());
+          return res.status(200).json({
+              success: true,
+              message: response.message,
+              user: (response as any).user // .user includes role
+          });
+      } catch (error: any) {
+          return res.status(error.statusCode || 400).json({ success: false, message: error.message });
+      }
+  }
 }
 
 export const authController = new AuthController();
