@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../../middleware/requireAuth";
 import { requireRole } from "../../middleware/requiredRole";
+import { requireAdmin } from "../../middleware/requireAdmin";
 import { attachUser } from "../../middleware/attachUser";
 import { validateFileContentMiddleware } from "../../middleware/validateFileContent";
 import { adminLimiter, generalLimiter } from "../../middleware/rateLimit";
@@ -48,15 +49,17 @@ adminRoutes.get(
   adminGetAppointmentDetails
 );
 
+// CRITICAL: Appointment status updates require DB-verified admin role
 adminRoutes.patch(
   "/appointments/:id/status",
   attachUser,
   requireAuth,
-  requireRole(Role.ADMIN),
+  requireAdmin, // Database-verified admin check
   validateFieldSizes(), // Validate field sizes
   adminUpdateAppointmentStatus
 );
 
+// CRITICAL: Appointment deletion requires DB-verified admin role
 // Admin delete endpoint: supports both DELETE (backward compatibility) and PATCH (recommended)
 // DELETE /admin/appointments/:id - default admin-only delete
 // PATCH /admin/appointments/:id/admin-delete - explicit admin-only delete (recommended)
@@ -64,14 +67,14 @@ adminRoutes.delete(
   "/appointments/:id",
   attachUser,
   requireAuth,
-  requireRole(Role.ADMIN),
+  requireAdmin, // Database-verified admin check
   adminDeleteAppointment
 );
 adminRoutes.patch(
   "/appointments/:id/admin-delete",
   attachUser,
   requireAuth,
-  requireRole(Role.ADMIN),
+  requireAdmin, // Database-verified admin check
   adminDeleteAppointment
 );
 
@@ -134,13 +137,13 @@ adminRoutes.post(
   saveDoctorSession
 );
 
-// Comprehensive Doctor Notes API
+// CRITICAL: Doctor Notes API - requires DB-verified admin role
 import pdfUpload from "../../middleware/pdfUploadConfig";
 adminRoutes.post(
   "/doctor-notes",
   attachUser,
   requireAuth,
-  requireRole(Role.ADMIN),
+  requireAdmin, // Database-verified admin check
   pdfUpload.array("dietCharts", 10), // Handle multiple PDF file uploads (max 10)
   validateFileContentMiddleware, // Validate file content matches MIME type
   validateFieldSizes(), // Validate field sizes (for JSON data in body)
@@ -151,7 +154,7 @@ adminRoutes.get(
   "/doctor-notes/:appointmentId",
   attachUser,
   requireAuth,
-  requireRole(Role.ADMIN),
+  requireRole(Role.ADMIN), // Read-only, JWT check sufficient
   getDoctorNotes
 );
 
@@ -159,7 +162,7 @@ adminRoutes.patch(
   "/doctor-notes/:appointmentId",
   attachUser,
   requireAuth,
-  requireRole(Role.ADMIN),
+  requireAdmin, // Database-verified admin check
   pdfUpload.array("dietCharts", 10), // Handle multiple PDF file uploads (max 10)
   validateFileContentMiddleware, // Validate file content matches MIME type
   validateFieldSizes(), // Validate field sizes (for JSON data in body)
@@ -170,7 +173,7 @@ adminRoutes.delete(
   "/doctor-notes/attachment/:attachmentId",
   attachUser,
   requireAuth,
-  requireRole(Role.ADMIN),
+  requireAdmin, // Database-verified admin check
   deleteDoctorNoteAttachment
 );
 

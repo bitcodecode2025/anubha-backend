@@ -8,11 +8,18 @@ const fileFilter = (
   file: Express.Multer.File,
   cb: multer.FileFilterCallback
 ) => {
-  // Allow only JPG, PNG, JPEG images
-  const allowedMimeTypes = ["image/jpeg", "image/jpg", "image/png"];
+  // Allow only JPG, PNG, JPEG images (including variant MIME types)
+  const allowedMimeTypes = [
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/x-png", // Some systems use this variant for PNG
+  ];
+
+  const fileMimeType = file.mimetype.toLowerCase();
 
   // Basic MIME type check
-  if (!allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+  if (!allowedMimeTypes.includes(fileMimeType)) {
     const error = new Error("Only JPG, PNG, and JPEG images are allowed!");
     error.name = "MulterFileTypeError";
     return cb(error);

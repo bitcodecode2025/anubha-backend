@@ -1,4 +1,4 @@
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import uploadRoutes from "./modules/upload/upload.routes";
@@ -12,11 +12,14 @@ import rawBodyMiddleware from "./middleware/rawBody";
 import { razorpayWebhookHandler } from "./modules/payment/payment.controller";
 import paymentRoutes from "./modules/payment/payment.routes";
 import adminRoutes from "./modules/admin/admin.routes";
+import invoiceRoutes from "./modules/invoice/invoice.routes";
+import testimonialsRoutes from "./modules/testimonials/testimonials.routes";
 import prisma from "./database/prismaclient";
 import { startAppointmentReminderCron } from "./cron/reminder";
 import { testMsg91Connection } from "./services/whatsapp.service";
 import { apiLogger } from "./middleware/apiLogger";
 import { env, validateRazorpayConfig } from "./config/env";
+import { verifyMailerConnection } from "./utils/mailer";
 
 // Environment variables are validated in ./config/env.ts
 // This will throw an error if required variables are missing
@@ -26,6 +29,7 @@ const app = express();
 app.use(cookieParser());
 
 // CORS must be applied BEFORE other middleware
+// CRITICAL: credentials: true allows cookies (auth_token) to be sent/received
 app.use(
   cors({
     origin: [
@@ -34,10 +38,12 @@ app.use(
       "http://192.168.29.116:3000",
       /^http:\/\/192\.168\.\d+\.\d+:3000$/,
     ],
-    credentials: true,
+    credentials: true, // REQUIRED: Allows cookies (auth_token)
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
     exposedHeaders: ["Set-Cookie"],
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
   })
 );
 
@@ -53,7 +59,9 @@ app.use(attachUser);
 app.post("/api/payment/webhook", rawBodyMiddleware, razorpayWebhookHandler);
 
 app.get("/api/health", (req: Request, res: Response) => {
-  return res.json({ message: "Nutriwell Backend Connected Successfully!" });
+  return res.json({
+    message: "Anubha Nutrition Clinic Backend Connected Successfully!",
+  });
 });
 
 // Development-only: Test MSG91 WhatsApp connection
@@ -78,6 +86,8 @@ app.use("/api/slots", slotRoutes);
 app.use("/api/appointments", appointmentRoutes);
 app.use("/api/payment", paymentRoutes);
 app.use("/api/admin", adminRoutes);
+app.use("/api/invoice", invoiceRoutes);
+app.use("/api/testimonials", testimonialsRoutes);
 
 app.use(multerErrorHandler);
 
@@ -128,31 +138,149 @@ function validatePaymentConfig() {
 }
 
 /**
- * Check database connection before starting server
+ * Sleep utility for retry delays
  */
-async function checkDatabaseConnection() {
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Check database connection with automatic retry logic
+ * Implements exponential backoff for transient connection errors
+ * Useful for serverless databases (like Neon) that may "wake up" slowly
+ */
+async function checkDatabaseConnection(
+  maxRetries: number = 5,
+  initialDelay: number = 1000
+): Promise<void> {
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log("==========================================");
+      console.log(
+        `🔍 Testing database connection... (Attempt ${attempt}/${maxRetries})`
+      );
+      console.log("==========================================");
+
+      // Connect to database
+      await prisma.$connect();
+      console.log("✅ Database is running and connected!");
+
+      // Test query to ensure database is responsive
+      await prisma.$queryRaw`SELECT 1`;
+      console.log("✅ Database connection test successful!");
+      console.log("==========================================");
+
+      // Success! Exit the retry loop
+      return;
+    } catch (error: any) {
+      lastError = error;
+      const errorCode = error?.code || "";
+      const errorMessage = error?.message || String(error);
+
+      console.error("==========================================");
+      console.error(
+        `❌ Database connection failed (Attempt ${attempt}/${maxRetries})`
+      );
+      console.error("Error Code:", errorCode);
+      console.error("Error Message:", errorMessage);
+      console.error("==========================================");
+
+      // Check if it's a connection error that might be transient
+      const isTransientError =
+        errorCode === "P1001" || // Can't reach database server
+        errorCode === "P1002" || // Database timeout
+        errorCode === "P1017" || // Server closed connection
+        errorMessage.includes("ECONNREFUSED") ||
+        errorMessage.includes("ETIMEDOUT") ||
+        errorMessage.includes("Can't reach database");
+
+      if (isTransientError && attempt < maxRetries) {
+        // Calculate delay with exponential backoff
+        const delay = initialDelay * Math.pow(2, attempt - 1);
+        console.log(
+          `🔄 Retrying in ${
+            delay / 1000
+          } seconds... (Database may be waking up)`
+        );
+        console.log("==========================================");
+        await sleep(delay);
+      } else if (attempt >= maxRetries) {
+        // Max retries reached
+        console.error("==========================================");
+        console.error("❌ Max retry attempts reached");
+        console.error("==========================================");
+        console.error("Please check:");
+        console.error("1. DATABASE_URL in .env file is correct");
+        console.error("2. Database server is running and accessible");
+        console.error("3. Network connection is stable");
+        console.error("4. Firewall/security groups allow connections");
+        console.error(
+          "Expected format: postgresql://user:password@host:port/database"
+        );
+        console.error("==========================================");
+        throw lastError;
+      } else {
+        // Non-transient error, fail immediately
+        console.error("==========================================");
+        console.error("❌ Non-recoverable database error");
+        console.error("==========================================");
+        throw error;
+      }
+    }
+  }
+
+  // If we get here, throw the last error
+  throw lastError;
+}
+
+/**
+ * Database connection health check middleware
+ * Automatically attempts reconnection if database connection is lost
+ */
+async function ensureDatabaseConnection(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
   try {
-    console.log("==========================================");
-    console.log("🔍 Testing database connection...");
-    console.log("==========================================");
-
-    await prisma.$connect();
-    console.log("✅ Database is running and connected!");
-
-    // Test query to ensure database is responsive
+    // Quick health check
     await prisma.$queryRaw`SELECT 1`;
-    console.log("✅ Database connection test successful!");
-    console.log("==========================================");
-  } catch (error) {
-    console.error("==========================================");
-    console.error("❌ Database connection failed:", error);
-    console.error("==========================================");
-    console.error("Please check your DATABASE_URL in .env file");
-    console.error(
-      "Expected format: postgresql://user:password@host:port/database"
-    );
-    console.error("==========================================");
-    process.exit(1);
+    next();
+  } catch (error: any) {
+    const errorCode = error?.code || "";
+
+    // Check if it's a connection error
+    if (
+      errorCode === "P1001" ||
+      errorCode === "P1002" ||
+      errorCode === "P1017"
+    ) {
+      console.log("[DATABASE] Connection lost, attempting to reconnect...");
+
+      try {
+        // Attempt to reconnect (with single retry)
+        await prisma.$disconnect();
+        await sleep(1000);
+        await prisma.$connect();
+        await prisma.$queryRaw`SELECT 1`;
+
+        console.log("[DATABASE] ✅ Reconnection successful");
+        next();
+      } catch (reconnectError) {
+        console.error("[DATABASE] ❌ Reconnection failed:", reconnectError);
+        return res.status(503).json({
+          success: false,
+          error: "Database connection unavailable. Please try again.",
+          code: "DB_CONNECTION_ERROR",
+          retryable: true,
+        });
+      }
+    } else {
+      // Other database errors
+      next(error);
+    }
   }
 }
 
@@ -162,11 +290,17 @@ async function startServer() {
     // Validate payment configuration
     validatePaymentConfig();
 
-    // Check database connection
+    // Check database connection with retry logic
     await checkDatabaseConnection();
+
+    // Apply database health check middleware to all routes
+    app.use(ensureDatabaseConnection);
 
     // Start appointment reminder cron job
     startAppointmentReminderCron();
+
+    // Verify mailer connection
+    await verifyMailerConnection();
 
     // Start Express server
     app.listen(PORT, "0.0.0.0", () => {
@@ -184,6 +318,53 @@ async function startServer() {
     process.exit(1);
   }
 }
+
+/**
+ * Graceful shutdown handler
+ * Properly closes database connections on server shutdown
+ */
+async function gracefulShutdown(signal: string) {
+  console.log("\n==========================================");
+  console.log(`⚠️  ${signal} signal received: closing server gracefully`);
+  console.log("==========================================");
+
+  try {
+    // Close database connection
+    console.log("Disconnecting from database...");
+    await prisma.$disconnect();
+    console.log("✅ Database disconnected");
+
+    console.log("==========================================");
+    console.log("✅ Server closed gracefully");
+    console.log("==========================================");
+    process.exit(0);
+  } catch (error) {
+    console.error("❌ Error during graceful shutdown:", error);
+    process.exit(1);
+  }
+}
+
+// Register shutdown handlers
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+// Handle uncaught exceptions
+process.on("uncaughtException", (error) => {
+  console.error("==========================================");
+  console.error("❌ Uncaught Exception:");
+  console.error(error);
+  console.error("==========================================");
+  gracefulShutdown("uncaughtException");
+});
+
+// Handle unhandled promise rejections
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("==========================================");
+  console.error("❌ Unhandled Promise Rejection:");
+  console.error("Promise:", promise);
+  console.error("Reason:", reason);
+  console.error("==========================================");
+});
 
 // Start the application
 startServer().catch((error) => {

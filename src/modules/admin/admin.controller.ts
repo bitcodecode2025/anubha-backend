@@ -5,9 +5,12 @@ import { Request, Response } from "express";
 import {
   sendPatientConfirmationMessage,
   sendDoctorNotificationMessage,
+  formatDateForTemplate,
+  formatTimeForTemplate,
 } from "../../services/whatsapp.service";
 import { getSingleAdmin } from "../slots/slots.services";
-import cloudinary, {
+import {
+  uploadPDFToCloudinary,
   generateSignedUrl,
   deleteFromCloudinary,
 } from "../../util/cloudinary";
@@ -68,6 +71,8 @@ export async function adminGetAppointments(req: Request, res: Response) {
           status: true,
           mode: true,
           planName: true,
+          planSlug: true,
+          planPackageName: true,
           paymentStatus: true,
           patient: {
             select: {
@@ -112,7 +117,9 @@ export async function adminDeleteAppointment(req: Request, res: Response) {
     }
 
     const { id } = req.params;
-    const { reason, scope } = req.body as {
+    // Handle DELETE requests that may not have a body, or PATCH requests with optional body
+    const body = req.body || {};
+    const { reason, scope } = body as {
       reason?: string;
       scope?: "admin" | "global";
     };
@@ -321,6 +328,33 @@ export async function adminUpdateAppointmentStatus(
             await tx.slot.update({
               where: { id: appointment.slotId },
               data: { isBooked: true },
+            });
+          }
+        }
+
+        // CRITICAL: If confirming appointment, archive any duplicate PENDING appointments
+        // This ensures only ONE active appointment exists per booking
+        if (status === "CONFIRMED") {
+          // Fetch appointment details needed for duplicate cleanup
+          const confirmedAppt = await tx.appointment.findUnique({
+            where: { id },
+            select: {
+              userId: true,
+              patientId: true,
+              startAt: true,
+              planSlug: true,
+            },
+          });
+
+          if (confirmedAppt) {
+            const {
+              archiveDuplicatePendingAppointments,
+            } = require("../payment/payment.controller");
+            await archiveDuplicatePendingAppointments(tx, id, {
+              userId: confirmedAppt.userId,
+              patientId: confirmedAppt.patientId,
+              startAt: confirmedAppt.startAt,
+              planSlug: confirmedAppt.planSlug || "",
             });
           }
         }
@@ -833,12 +867,10 @@ export async function saveDoctorNotes(req: Request, res: Response) {
             const randomStr = Math.random().toString(36).substring(2, 15);
             const uniqueId = `nutriwell_diet_chart_${timestamp}_${randomStr}_${i}`;
 
-            // Upload to Cloudinary
-            const cloudinaryResult = await cloudinary.uploader.upload(base64, {
+            // Upload to Cloudinary using utility function
+            const cloudinaryResult = await uploadPDFToCloudinary(base64, {
               folder: "nutriwell_diet_charts",
-              resource_type:
-                file.mimetype === "application/pdf" ? "raw" : "image",
-              public_id: uniqueId,
+              publicId: uniqueId,
               context: {
                 uploaded_at: new Date().toISOString(),
                 uploaded_by: adminId,
@@ -854,20 +886,14 @@ export async function saveDoctorNotes(req: Request, res: Response) {
               resourceType: cloudinaryResult.resource_type,
             });
 
-            // Generate signed URL for secure access
-            // Use the same resource_type as the upload (raw for PDFs, image for images)
-            const resourceType =
-              file.mimetype === "application/pdf" ? "raw" : "image";
-            const signedUrl = generateSignedUrl(
-              cloudinaryResult.public_id,
-              365 * 24 * 60 * 60,
-              resourceType as "raw" | "image"
-            );
+            // Use Cloudinary's secure_url directly - it includes proper Content-Type headers
+            // No need for signed URLs when using resource_type: "auto"
+            const fileUrl = cloudinaryResult.secure_url;
 
             // Store file info
             uploadedFiles.push({
               fileName: file.originalname,
-              fileUrl: signedUrl,
+              fileUrl: fileUrl,
               publicId: cloudinaryResult.public_id,
               mimeType: file.mimetype,
               sizeInBytes: file.size,
@@ -881,7 +907,7 @@ export async function saveDoctorNotes(req: Request, res: Response) {
                 file.originalname;
               parsedFormData.dietPrescribed.dietChartFileSize = file.size;
               parsedFormData.dietPrescribed.dietChartMimeType = file.mimetype;
-              parsedFormData.dietPrescribed.dietChartUrl = signedUrl;
+              parsedFormData.dietPrescribed.dietChartUrl = fileUrl;
               parsedFormData.dietPrescribed.dietChartPublicId =
                 cloudinaryResult.public_id;
             }
@@ -1216,6 +1242,15 @@ async function sendWhatsAppNotificationsForAdminConfirmation(appointment: any) {
     const doctorPhone = appointment.doctor?.phone;
     const doctorName = appointment.doctor?.name || "Doctor";
 
+    // Prepare data for doctor notification
+    const planName = appointment.planName || "Consultation Plan";
+    const slotStartTime = appointment.slot?.startAt || appointment.startAt;
+    const slotEndTime = appointment.slot?.endAt || appointment.endAt;
+
+    // Format appointment date and slot time
+    const appointmentDate = formatDateForTemplate(slotStartTime);
+    const slotTimeFormatted = formatTimeForTemplate(slotStartTime, slotEndTime);
+
     if (!doctorPhone) {
       console.log(
         "[ADMIN WHATSAPP] Doctor phone not found in appointment, trying admin fallback..."
@@ -1229,13 +1264,19 @@ async function sendWhatsAppNotificationsForAdminConfirmation(appointment: any) {
           console.log(
             "[ADMIN WHATSAPP] Sending doctor notification (using admin phone)..."
           );
-          const doctorResult = await sendDoctorNotificationMessage(adminPhone);
+          const doctorResult = await sendDoctorNotificationMessage(
+            planName,
+            patientName,
+            appointmentDate,
+            slotTimeFormatted
+          );
           if (doctorResult.success) {
             console.log("==========================================");
             console.log(
               "[ADMIN WHATSAPP] ✅ Doctor notification sent successfully"
             );
             console.log("  Admin Phone:", adminPhone);
+            console.log("  Template: doctor_confirmation");
             console.log("==========================================");
           } else {
             console.error("==========================================");
@@ -1257,13 +1298,19 @@ async function sendWhatsAppNotificationsForAdminConfirmation(appointment: any) {
       }
     } else {
       console.log("[ADMIN WHATSAPP] Sending doctor notification...");
-      const doctorResult = await sendDoctorNotificationMessage(doctorPhone);
+      const doctorResult = await sendDoctorNotificationMessage(
+        planName,
+        patientName,
+        appointmentDate,
+        slotTimeFormatted
+      );
       if (doctorResult.success) {
         console.log("==========================================");
         console.log(
           "[ADMIN WHATSAPP] ✅ Doctor notification sent successfully"
         );
         console.log("  Doctor Phone:", doctorPhone);
+        console.log("  Template: doctor_confirmation");
         console.log("==========================================");
       } else {
         console.error("==========================================");

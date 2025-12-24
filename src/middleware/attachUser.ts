@@ -19,6 +19,18 @@ export async function attachUser(
     }
 
     if (!token) {
+      // Log missing cookie for debugging (only on non-auth endpoints)
+      if (
+        !req.path.includes("/auth/") &&
+        !req.path.includes("/api/health") &&
+        req.method !== "OPTIONS"
+      ) {
+        console.warn("[AUTH] Cookie missing:", {
+          path: req.path,
+          method: req.method,
+          timestamp: new Date().toISOString(),
+        });
+      }
       return next();
     }
 
@@ -31,6 +43,7 @@ export async function attachUser(
       console.warn("[AUTH] Token verification failed:", {
         hasToken: !!token,
         tokenLength: token.length,
+        tokenPreview: token.substring(0, 20) + "...",
         timestamp: new Date().toISOString(),
         path: req.path,
         method: req.method,

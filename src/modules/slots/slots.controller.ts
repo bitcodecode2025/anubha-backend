@@ -8,6 +8,7 @@ import {
   getAdminSlots,
   getAdminDayOffList,
   previewSlotsForRange,
+  getAdminSlotDateRange,
 } from "./slots.services";
 import {
   generateSlotsSchema,
@@ -186,6 +187,23 @@ export async function previewSlotsHandler(req: Request, res: Response) {
     return res.status(400).json({
       success: false,
       message: err?.message || "Failed to preview slots",
+    });
+  }
+}
+
+export async function getSlotDateRangeHandler(req: Request, res: Response) {
+  try {
+    const dateRange = await getAdminSlotDateRange();
+
+    return res.status(200).json({
+      success: true,
+      data: dateRange,
+    });
+  } catch (err: any) {
+    console.error("getSlotDateRangeHandler error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err?.message || "Failed to fetch slot date range",
     });
   }
 }

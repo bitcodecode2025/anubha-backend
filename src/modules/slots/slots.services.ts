@@ -431,6 +431,62 @@ export async function getAvailableSlotsForDate(opts: {
   return formattedSlots;
 }
 
+// ADMIN: get slot date range (earliest and latest slot dates)
+export async function getAdminSlotDateRange() {
+  try {
+    const adminId = await getSingleAdminId();
+
+    // Get the earliest slot date
+    const earliestSlot = await prisma.slot.findFirst({
+      where: {
+        adminId,
+        isArchived: false,
+      },
+      orderBy: {
+        startAt: "asc",
+      },
+      select: {
+        startAt: true,
+      },
+    });
+
+    // Get the latest slot date
+    const latestSlot = await prisma.slot.findFirst({
+      where: {
+        adminId,
+        isArchived: false,
+      },
+      orderBy: {
+        startAt: "desc",
+      },
+      select: {
+        startAt: true,
+      },
+    });
+
+    if (!earliestSlot || !latestSlot) {
+      return {
+        hasSlots: false,
+        earliestDate: null,
+        latestDate: null,
+      };
+    }
+
+    // Format dates to YYYY-MM-DD
+    const earliestDate = earliestSlot.startAt.toISOString().split("T")[0];
+    const latestDate = latestSlot.startAt.toISOString().split("T")[0];
+
+    return {
+      hasSlots: true,
+      earliestDate,
+      latestDate,
+    };
+  } catch (error: any) {
+    console.error("[SLOTS SERVICE] Error getting slot date range:", error);
+    throw error;
+  }
+}
+
 // ADMIN: fetch all slots (with booking details)
 export async function getAdminSlots(opts: {
   date?: string;

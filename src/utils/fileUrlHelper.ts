@@ -45,10 +45,12 @@ export function regenerateFileSignedUrl(file: {
     }
 
     // Regenerate signed URL (expires in 1 year)
+    // For PDFs and raw files, display inline (preview) instead of download
     const signedUrl = generateSignedUrl(
       file.publicId,
       365 * 24 * 60 * 60,
-      resourceType
+      resourceType,
+      true // Display inline (preview) instead of download
     );
     return {
       ...file,

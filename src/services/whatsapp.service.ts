@@ -13,6 +13,8 @@ const MSG91_API_URL =
   "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/";
 const INTEGRATED_NUMBER = process.env.MSG91_INTEGRATED_NUMBER || "917880293523";
 const MSG91_NAMESPACE = "bd7eaf00_3a31_451d_8435_6cd400ead584";
+// Admin phone number - fixed phone number for admin notifications
+const ADMIN_PHONE_NUMBER = "916260440241";
 
 // Development mode check
 const IS_DEVELOPMENT = process.env.NODE_ENV !== "production";
@@ -282,6 +284,11 @@ export async function sendWhatsAppMessage(
               to: [formattedPhone],
               components: variables
                 ? {
+                    header_1: variables.header_1
+                      ? typeof variables.header_1 === "string"
+                        ? { type: "text", value: variables.header_1 }
+                        : variables.header_1
+                      : undefined,
                     body_1: variables.body_1
                       ? typeof variables.body_1 === "string"
                         ? { type: "text", value: variables.body_1 }
@@ -529,159 +536,388 @@ export async function sendPatientConfirmationMessage(
 }
 
 /**
- * Send doctor notification WhatsApp message
- * @param doctorPhone - Doctor phone number
+ * Send admin notification WhatsApp message using doctor_confirmation template
+ * Always sends to fixed admin phone number: 916260440241
+ * Template variables:
+ * - header_1: Plan name
+ * - body_1: Patient name (from patient details)
+ * - body_2: Appointment date
+ * - body_3: Slot time (e.g., "10:00 AM - 10:40 AM")
  */
 export async function sendDoctorNotificationMessage(
-  doctorPhone: string
+  planName: string,
+  patientName: string,
+  appointmentDate: string,
+  slotTime: string,
+  doctorPhone?: string // Optional - kept for backward compatibility, but always uses ADMIN_PHONE_NUMBER
 ): Promise<{ success: boolean; message?: string; error?: string }> {
-  return sendWhatsAppMessage(doctorPhone, "testing_nut", undefined, "en_US");
+  // Build template variables for doctor_confirmation template
+  const templateVariables: WhatsAppTemplateVariables = {
+    header_1: {
+      type: "text",
+      value: planName || "Consultation Plan",
+    },
+    body_1: {
+      type: "text",
+      value: patientName || "Patient",
+    },
+    body_2: {
+      type: "text",
+      value: appointmentDate,
+    },
+    body_3: {
+      type: "text",
+      value: slotTime,
+    },
+  };
+
+  // Always use the fixed admin phone number
+  return sendWhatsAppMessage(
+    ADMIN_PHONE_NUMBER,
+    "doctor_confirmation",
+    templateVariables,
+    "en_US"
+  );
 }
 
 /**
- * Send booking confirmation SMS/WhatsApp message
- * Uses MSG91_TEMPLATE_BOOKING_CONFIRMATION template or falls back to "patient"
+ * Get the fixed admin phone number
+ */
+export function getAdminPhoneNumber(): string {
+  return ADMIN_PHONE_NUMBER;
+}
+
+/**
+ * Send WhatsApp template message using MSG91 API
+ * Reusable function that formats template variables correctly
+ *
+ * @param templateName - Template name (e.g., "bookingconfirm", "reminderbooking")
+ * @param phoneNumber - Recipient phone number (with country code)
+ * @param patientName - Patient name for body_1
+ * @param appointmentDate - Appointment date (formatted string) for body_2
+ * @param slotTime - Slot time (formatted string) for body_3
+ */
+export async function sendWhatsappTemplate({
+  templateName,
+  phoneNumber,
+  patientName,
+  appointmentDate,
+  slotTime,
+}: {
+  templateName: string;
+  phoneNumber: string;
+  patientName: string;
+  appointmentDate: string;
+  slotTime: string;
+}): Promise<{ success: boolean; message?: string; error?: string }> {
+  try {
+    // Validate inputs
+    if (!phoneNumber) {
+      console.error("[WHATSAPP TEMPLATE] Phone number is required");
+      return {
+        success: false,
+        error: "Phone number is required",
+      };
+    }
+
+    if (!templateName) {
+      console.error("[WHATSAPP TEMPLATE] Template name is required");
+      return {
+        success: false,
+        error: "Template name is required",
+      };
+    }
+
+    // Format phone number
+    const formattedPhone = formatPhoneNumber(phoneNumber);
+
+    // Build template variables
+    const templateVariables: WhatsAppTemplateVariables = {
+      body_1: {
+        type: "text",
+        value: patientName || "Patient",
+      },
+      body_2: {
+        type: "text",
+        value: appointmentDate || "",
+      },
+      body_3: {
+        type: "text",
+        value: slotTime || "",
+      },
+    };
+
+    // Send message using existing sendWhatsAppMessage function
+    return await sendWhatsAppMessage(
+      formattedPhone,
+      templateName,
+      templateVariables,
+      "en_US" // Use en_US for MSG91 templates
+    );
+  } catch (error: any) {
+    console.error("[WHATSAPP TEMPLATE] Error sending template message:", error);
+    return {
+      success: false,
+      error: error?.message || "Failed to send WhatsApp template message",
+    };
+  }
+}
+
+/**
+ * Format date to full readable string with day of week and ordinal suffix
+ * Example: "Tuesday, 12th January 2026"
+ */
+export function formatDateForTemplate(date: Date): string {
+  // Get day of week
+  const dayOfWeek = date.toLocaleDateString("en-US", {
+    weekday: "long",
+    timeZone: "Asia/Kolkata",
+  });
+
+  // Get day with ordinal suffix (1st, 2nd, 3rd, 4th, etc.)
+  const day = date.getDate();
+  const ordinalSuffix = getOrdinalSuffix(day);
+
+  // Get month and year
+  const month = date.toLocaleDateString("en-US", {
+    month: "long",
+    timeZone: "Asia/Kolkata",
+  });
+  const year = date.getFullYear();
+
+  // Format: "Tuesday, 12th January 2026"
+  return `${dayOfWeek}, ${day}${ordinalSuffix} ${month} ${year}`;
+}
+
+/**
+ * Get ordinal suffix for a day number (1st, 2nd, 3rd, 4th, etc.)
+ */
+function getOrdinalSuffix(day: number): string {
+  if (day > 3 && day < 21) return "th"; // 11th, 12th, 13th, etc.
+  switch (day % 10) {
+    case 1:
+      return "st";
+    case 2:
+      return "nd";
+    case 3:
+      return "rd";
+    default:
+      return "th";
+  }
+}
+
+/**
+ * Format time to full readable string
+ * Example: "10:00 AM - 10:40 AM"
+ * If endDate is provided, formats as time range. Otherwise, just start time.
+ */
+export function formatTimeForTemplate(startDate: Date, endDate?: Date): string {
+  // Format start time with 2-digit minutes and AM/PM
+  const startTime = startDate.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Kolkata",
+  });
+
+  if (endDate) {
+    // Format end time with 2-digit minutes and AM/PM
+    const endTime = endDate.toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+      timeZone: "Asia/Kolkata",
+    });
+    return `${startTime} - ${endTime}`;
+  }
+
+  return startTime;
+}
+
+/**
+ * Send booking confirmation WhatsApp message
+ * Uses "bookingconfirm" template
+ * Template variables:
+ * - body_1: Patient Name
+ * - body_2: Appointment Date
+ * - body_3: Slot Time (e.g., "10:00 AM - 10:40 AM")
  */
 export async function sendBookingConfirmationMessage(
   patientPhone: string,
-  slotTime: Date,
-  variables?: WhatsAppTemplateVariables
+  slotStartTime: Date,
+  patientName?: string,
+  slotEndTime?: Date
 ): Promise<{ success: boolean; message?: string; error?: string }> {
-  const templateName =
-    process.env.MSG91_TEMPLATE_BOOKING_CONFIRMATION || "patient";
-  const formattedPatientPhone = formatPhoneNumber(patientPhone);
+  const appointmentDate = formatDateForTemplate(slotStartTime);
+  const slotTimeFormatted = formatTimeForTemplate(slotStartTime, slotEndTime);
 
-  // Format slot time for template (you may need to adjust format based on template requirements)
-  const slotTimeFormatted = slotTime.toLocaleString("en-IN", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "Asia/Kolkata",
+  return sendWhatsappTemplate({
+    templateName: "bookingconfirm",
+    phoneNumber: patientPhone,
+    patientName: patientName || "Patient",
+    appointmentDate,
+    slotTime: slotTimeFormatted,
   });
-
-  const templateVariables: WhatsAppTemplateVariables = {
-    body_1: {
-      type: "numbers",
-      value: formattedPatientPhone,
-    },
-    body_2: {
-      type: "text",
-      value: slotTimeFormatted,
-    },
-    ...variables,
-  };
-
-  return sendWhatsAppMessage(
-    patientPhone,
-    templateName,
-    templateVariables,
-    "en"
-  );
 }
 
 /**
- * Send reminder SMS/WhatsApp message (1 hour before appointment)
- * Uses MSG91_TEMPLATE_REMINDER template or falls back to "patient"
+ * Send reminder WhatsApp message (1 hour before appointment)
+ * Uses "reminderbooking" template
+ * Template variables:
+ * - body_1: Patient Name
+ * - body_2: Appointment Date
+ * - body_3: Slot Time (e.g., "10:00 AM - 10:40 AM")
  */
 export async function sendReminderMessage(
   patientPhone: string,
-  slotTime: Date,
-  variables?: WhatsAppTemplateVariables
+  slotStartTime: Date,
+  patientName?: string,
+  slotEndTime?: Date
 ): Promise<{ success: boolean; message?: string; error?: string }> {
-  const templateName = process.env.MSG91_TEMPLATE_REMINDER || "patient";
-  const formattedPatientPhone = formatPhoneNumber(patientPhone);
+  const appointmentDate = formatDateForTemplate(slotStartTime);
+  const slotTimeFormatted = formatTimeForTemplate(slotStartTime, slotEndTime);
 
-  const slotTimeFormatted = slotTime.toLocaleString("en-IN", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "Asia/Kolkata",
+  return sendWhatsappTemplate({
+    templateName: "reminderbooking",
+    phoneNumber: patientPhone,
+    patientName: patientName || "Patient",
+    appointmentDate,
+    slotTime: slotTimeFormatted,
   });
-
-  const templateVariables: WhatsAppTemplateVariables = {
-    body_1: {
-      type: "numbers",
-      value: formattedPatientPhone,
-    },
-    body_2: {
-      type: "text",
-      value: slotTimeFormatted,
-    },
-    ...variables,
-  };
-
-  return sendWhatsAppMessage(
-    patientPhone,
-    templateName,
-    templateVariables,
-    "en"
-  );
 }
 
 /**
- * Send last-minute combined confirmation + reminder SMS/WhatsApp message
- * Uses MSG91_TEMPLATE_LAST_MINUTE template or falls back to "patient"
+ * Send last-minute booking confirmation WhatsApp message
+ * Uses "bookingconfirm" template (same as normal booking confirmation)
+ * For last-minute bookings, only the confirmation is sent (no reminder later)
+ * Template variables:
+ * - body_1: Patient Name
+ * - body_2: Appointment Date
+ * - body_3: Slot Time (e.g., "10:00 AM - 10:40 AM")
  */
 export async function sendLastMinuteConfirmationMessage(
   patientPhone: string,
-  slotTime: Date,
-  variables?: WhatsAppTemplateVariables
+  slotStartTime: Date,
+  patientName?: string,
+  slotEndTime?: Date
 ): Promise<{ success: boolean; message?: string; error?: string }> {
-  const templateName = process.env.MSG91_TEMPLATE_LAST_MINUTE || "patient";
-  const formattedPatientPhone = formatPhoneNumber(patientPhone);
+  // Use bookingconfirm template for last-minute bookings too
+  // Reminder will NOT be sent later (reminderSent will be set to true)
+  const appointmentDate = formatDateForTemplate(slotStartTime);
+  const slotTimeFormatted = formatTimeForTemplate(slotStartTime, slotEndTime);
 
-  const slotTimeFormatted = slotTime.toLocaleString("en-IN", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "Asia/Kolkata",
+  return sendWhatsappTemplate({
+    templateName: "bookingconfirm",
+    phoneNumber: patientPhone,
+    patientName: patientName || "Patient",
+    appointmentDate,
+    slotTime: slotTimeFormatted,
   });
-
-  const templateVariables: WhatsAppTemplateVariables = {
-    body_1: {
-      type: "numbers",
-      value: formattedPatientPhone,
-    },
-    body_2: {
-      type: "text",
-      value: slotTimeFormatted,
-    },
-    ...variables,
-  };
-
-  return sendWhatsAppMessage(
-    patientPhone,
-    templateName,
-    templateVariables,
-    "en"
-  );
 }
 
 /**
- * Send OTP SMS/WhatsApp message
- * Uses MSG91_TEMPLATE_OTP template if configured
- * Note: Currently OTP is not sent via MSG91 in the codebase, but this function is available for future use
+ * Send OTP via WhatsApp using MSG91 login_magic template
+ * Template structure matches MSG91 API requirements:
+ * - Template name: "login_magic"
+ * - Uses header_1 component with OTP value
+ * - Phone number format: 91XXXXXXXXXX (12 digits)
  */
 export async function sendOtpMessage(
   phone: string,
-  otp: string,
-  variables?: WhatsAppTemplateVariables
+  otp: string
 ): Promise<{ success: boolean; message?: string; error?: string }> {
-  const templateName = process.env.MSG91_TEMPLATE_OTP;
-  if (!templateName) {
+  // Validate MSG91 configuration
+  if (!MSG91_AUTH_KEY) {
+    console.error("[OTP] MSG91_AUTH_KEY is not configured");
     return {
       success: false,
-      error:
-        "MSG91_TEMPLATE_OTP not configured. OTP sending via MSG91 is disabled.",
+      error: "MSG91_AUTH_KEY is not configured. OTP sending is disabled.",
     };
   }
 
-  const formattedPhone = formatPhoneNumber(phone);
+  try {
+    // Format phone number to 91XXXXXXXXXX format
+    const formattedPhone = formatPhoneNumber(phone);
 
-  const templateVariables: WhatsAppTemplateVariables = {
-    body_1: {
-      type: "text",
-      value: otp,
-    },
-    ...variables,
-  };
+    // Validate phone number format
+    if (!formattedPhone.startsWith("91") || formattedPhone.length !== 12) {
+      console.error("[OTP] Invalid phone number format:", phone);
+      return {
+        success: false,
+        error: `Invalid phone number format. Expected 91XXXXXXXXXX, got: ${formattedPhone}`,
+      };
+    }
 
-  return sendWhatsAppMessage(phone, templateName, templateVariables, "en");
+    // Trim auth key
+    const authKeyTrimmed = MSG91_AUTH_KEY.trim();
+
+    // Build request body according to MSG91 API structure
+    const requestBody = {
+      integrated_number: INTEGRATED_NUMBER,
+      content_type: "template",
+      payload: {
+        messaging_product: "whatsapp",
+        type: "template",
+        template: {
+          name: "login_magic",
+          language: {
+            code: "en",
+            policy: "deterministic",
+          },
+          namespace: MSG91_NAMESPACE,
+          to_and_components: [
+            {
+              to: [formattedPhone],
+              components: {
+                header_1: {
+                  type: "text",
+                  value: otp, // 4-digit OTP
+                },
+              },
+            },
+          ],
+        },
+      },
+    };
+
+    console.log("[OTP] Sending OTP via MSG91 WhatsApp:");
+    console.log("  - Phone:", formattedPhone);
+    console.log("  - OTP:", otp);
+    console.log("  - Template: login_magic");
+
+    // Make API request
+    const apiUrlWithAuth = `${MSG91_API_URL}?authkey=${encodeURIComponent(
+      authKeyTrimmed
+    )}`;
+
+    const response = await axios.post(apiUrlWithAuth, requestBody, {
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        authkey: authKeyTrimmed,
+      },
+    });
+
+    console.log("[OTP] ✅ OTP sent successfully");
+    console.log("  - Status:", response.status);
+    console.log("  - Response:", JSON.stringify(response.data, null, 2));
+
+    return {
+      success: true,
+      message: "OTP sent successfully via WhatsApp",
+    };
+  } catch (error: any) {
+    console.error("[OTP] ❌ Failed to send OTP:", error);
+    console.error("  - Error message:", error?.message);
+    console.error("  - Response data:", error?.response?.data);
+    console.error("  - Status:", error?.response?.status);
+
+    return {
+      success: false,
+      error:
+        error?.response?.data?.message ||
+        error?.message ||
+        "Failed to send OTP via WhatsApp",
+    };
+  }
 }

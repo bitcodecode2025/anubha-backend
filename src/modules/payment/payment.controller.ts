@@ -2,15 +2,23 @@ import { Request, Response } from "express";
 import crypto from "crypto";
 import Razorpay from "razorpay";
 import prisma from "../../database/prismaclient";
-import { getSingleAdminId, getSingleAdmin } from "../slots/slots.services";
+import { getSingleAdminId } from "../slots/slots.services";
 import { PLANS, PlanSlug } from "../../constants/plan";
 import { AppointmentMode, Prisma } from "@prisma/client";
 import {
-  sendPatientConfirmationMessage,
-  sendDoctorNotificationMessage,
   sendBookingConfirmationMessage,
   sendLastMinuteConfirmationMessage,
+  sendDoctorNotificationMessage,
+  formatDateForTemplate,
+  formatTimeForTemplate,
 } from "../../services/whatsapp.service";
+import { generateInvoiceForAppointment } from "../../services/invoice.service";
+import {
+  paymentService,
+  PaymentStatus,
+  isValidTransition,
+  normalizePaymentStatus,
+} from "./payment.service";
 
 // Initialize Razorpay instance
 // Note: Environment variables are validated at startup in src/config/env.ts
@@ -35,23 +43,99 @@ export function normalizeAppointmentMode(input: string): AppointmentMode {
 }
 
 /**
+ * COMPREHENSIVE DUPLICATE CLEANUP
+ * Archives all PENDING appointments that match the same logical booking
+ * Matches by: userId, patientId, startAt (slotTime), planSlug
+ * This ensures only ONE active appointment exists per booking
+ */
+export async function archiveDuplicatePendingAppointments(
+  tx: Prisma.TransactionClient,
+  confirmedAppointmentId: string,
+  confirmedAppointment: {
+    userId: string;
+    patientId: string;
+    startAt: Date | string;
+    planSlug: string;
+  }
+) {
+  // Build comprehensive where clause for duplicate detection
+  // Match by: userId, patientId, startAt (slotTime), planSlug
+  const duplicateWhere: Prisma.AppointmentWhereInput = {
+    userId: confirmedAppointment.userId,
+    patientId: confirmedAppointment.patientId,
+    startAt: new Date(confirmedAppointment.startAt),
+    planSlug: confirmedAppointment.planSlug,
+    status: "PENDING",
+    id: { not: confirmedAppointmentId }, // Exclude the one we just confirmed
+    isArchived: false, // Only archive active appointments
+  };
+
+  const duplicatePendingAppointments = await tx.appointment.findMany({
+    where: duplicateWhere,
+    select: { id: true },
+  });
+
+  if (duplicatePendingAppointments.length > 0) {
+    console.log(
+      `[DUPLICATE CLEANUP] 🧹 Archiving ${duplicatePendingAppointments.length} duplicate PENDING appointment(s) for the same booking`,
+      {
+        userId: confirmedAppointment.userId,
+        patientId: confirmedAppointment.patientId,
+        startAt: confirmedAppointment.startAt,
+        planSlug: confirmedAppointment.planSlug,
+      }
+    );
+
+    await tx.appointment.updateMany({
+      where: {
+        id: {
+          in: duplicatePendingAppointments.map((apt) => apt.id),
+        },
+      },
+      data: {
+        isArchived: true,
+        archivedAt: new Date(),
+      },
+    });
+
+    console.log(
+      `[DUPLICATE CLEANUP] ✅ Archived duplicate appointments:`,
+      duplicatePendingAppointments.map((apt) => apt.id)
+    );
+  }
+
+  return duplicatePendingAppointments.length;
+}
+
+/**
  * Create Razorpay order for an existing appointment
  * This is the main flow: appointment is created in recall flow, then order is created here
  */
+/**
+ * Create Razorpay order for an appointment
+ * Production-grade implementation with:
+ * - Transaction safety (no external API calls in transactions)
+ * - Payment state machine validation
+ * - Idempotency and retry safety
+ * - Comprehensive error handling and logging
+ */
 export async function createOrderHandler(req: Request, res: Response) {
+  const requestId = `req_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 9)}`;
+  const startTime = Date.now();
+
   try {
-    console.log("[PAYMENT] Create order request received");
+    console.log(`[PAYMENT:${requestId}] Create order request received`);
+
     const userId = req.user?.id;
     if (!userId) {
-      console.error("[PAYMENT] Unauthenticated request");
+      console.error(`[PAYMENT:${requestId}] Unauthenticated request`);
       return res.status(401).json({
         success: false,
         error: "Unauthenticated. Please login again.",
       });
     }
-
-    // Note: Razorpay configuration is validated at startup
-    // If we reach here, Razorpay is configured
 
     // Support both new flow (appointmentId) and old flow (slotId, patientId) for backward compatibility
     const { appointmentId, slotId, patientId, planSlug, appointmentMode } =
@@ -63,115 +147,187 @@ export async function createOrderHandler(req: Request, res: Response) {
         appointmentMode?: string;
       };
 
-    console.log("[PAYMENT] Request body:", {
+    console.log(`[PAYMENT:${requestId}] Request body:`, {
       appointmentId: appointmentId || "none",
       slotId: slotId || "none",
       planSlug: planSlug || "none",
+      userId,
     });
 
     let appointment: any;
 
     // NEW FLOW: Use existing appointment (created in recall flow)
     if (appointmentId) {
-      console.log("[PAYMENT] Using existing appointment:", appointmentId);
+      console.log(
+        `[PAYMENT:${requestId}] NEW FLOW: Using existing appointment:`,
+        appointmentId
+      );
 
-      // Use transaction to prevent race conditions
-      appointment = await prisma.$transaction(async (tx) => {
-        const appt = await tx.appointment.findFirst({
-          where: {
-            id: appointmentId,
-            userId,
-            isArchived: false, // Exclude archived appointments
-          },
-          include: {
-            patient: true,
-            slot: true,
-          },
-        });
+      // ============================================================
+      // STEP 1: Validate appointment and existing payment state (OUTSIDE transaction)
+      // ============================================================
+      const validationResult =
+        await paymentService.validateAppointmentForPayment(
+          appointmentId,
+          userId
+        );
 
-        if (!appt) {
-          throw new Error("Appointment not found or unauthorized");
-        }
+      if (!validationResult.canProceed) {
+        console.error(
+          `[PAYMENT:${requestId}] Validation failed:`,
+          validationResult.error
+        );
+        return res
+          .status(
+            validationResult.error?.includes("not found")
+              ? 404
+              : validationResult.error?.includes("booked")
+              ? 409
+              : 400
+          )
+          .json({
+            success: false,
+            error: validationResult.error || "Validation failed",
+          });
+      }
 
-        // Validate appointment is in PENDING status
-        if (appt.status !== "PENDING") {
-          throw new Error(
-            `Appointment is already ${appt.status.toLowerCase()}. Cannot create payment order.`
-          );
-        }
+      const existingAppt = validationResult.appointment;
+      const planPrice = existingAppt.planPrice;
 
-        // Validate slot is assigned
-        if (!appt.slotId || !appt.slot) {
-          throw new Error(
-            "No slot assigned to appointment. Please select a slot first."
-          );
-        }
+      // ============================================================
+      // STEP 2: Check payment status in database first (source of truth)
+      // ============================================================
+      const dbPaymentStatus = normalizePaymentStatus(
+        (existingAppt as any).paymentStatus
+      );
 
-        // Check if slot is already booked (race condition check)
-        if (appt.slot.isBooked) {
-          throw new Error(
-            "Slot is already booked by another user. Please select a different slot."
-          );
-        }
-
-        // Check if order already exists for this appointment
-        if (appt.paymentId) {
-          console.log(
-            "[PAYMENT] Order already exists for appointment:",
-            appt.paymentId
-          );
-          // Return existing order info - don't create duplicate
-          // This will be handled by frontend to resume payment
-          throw new Error("Payment order already exists for this appointment.");
-        }
-
-        return appt;
+      console.log(`[PAYMENT:${requestId}] Payment status check:`, {
+        appointmentId: existingAppt.id,
+        dbPaymentStatus,
+        appointmentStatus: existingAppt.status,
+        paymentId: existingAppt.paymentId,
       });
 
-      // Get plan price from appointment (already validated in recall flow)
-      const planPrice = appointment.planPrice;
-
-      // Validate plan price
-      if (!planPrice || planPrice <= 0) {
-        console.error("[PAYMENT] Invalid plan price:", planPrice);
+      // If payment is already PAID in our database, return error
+      if (
+        dbPaymentStatus === PaymentStatus.PAID ||
+        existingAppt.status === "CONFIRMED"
+      ) {
+        console.log(
+          `[PAYMENT:${requestId}] Payment already completed in database`
+        );
         return res.status(400).json({
           success: false,
-          error: "Invalid plan price. Please contact support.",
+          error: "Payment already completed for this appointment.",
         });
       }
 
-      // Convert to paise (Razorpay requires amount in smallest currency unit)
-      const amountInPaise = Math.round(planPrice * 100);
+      // ============================================================
+      // STEP 3: Check existing order in Razorpay (OUTSIDE transaction)
+      // ============================================================
+      const orderCheck = await paymentService.checkExistingOrder(
+        existingAppt.paymentId,
+        dbPaymentStatus // Pass DB payment status to handle inconsistencies
+      );
 
-      console.log("[PAYMENT] Creating Razorpay order:", {
+      if (orderCheck.error && orderCheck.error !== "PAYMENT_STATUS_MISMATCH") {
+        console.error(
+          `[PAYMENT:${requestId}] Order check error:`,
+          orderCheck.error
+        );
+        return res.status(400).json({
+          success: false,
+          error: orderCheck.error,
+        });
+      }
+
+      // Handle payment status mismatch (Razorpay says paid, but DB says PENDING)
+      // This can happen due to webhook delays or failures
+      if (orderCheck.error === "PAYMENT_STATUS_MISMATCH") {
+        console.warn(
+          `[PAYMENT:${requestId}] ⚠️ Payment status mismatch detected - Razorpay says paid but DB says PENDING`
+        );
+        // Allow user to retry - the verifyPayment/webhook will sync the status
+        // For now, expire the old order and create a new one
+        orderCheck.shouldExpire = true;
+      }
+
+      if (orderCheck.shouldReuse && orderCheck.order) {
+        console.log(
+          `[PAYMENT:${requestId}] ✅ Reusing existing valid order:`,
+          orderCheck.order.id
+        );
+        return res.json({
+          success: true,
+          order: {
+            id: orderCheck.order.id,
+            amount: orderCheck.order.amount,
+            currency: orderCheck.order.currency,
+            receipt: orderCheck.order.receipt,
+            status: orderCheck.order.status,
+          },
+          appointmentId: existingAppt.id,
+        });
+      }
+
+      // ============================================================
+      // STEP 3: Mark old order as expired if needed (SHORT transaction - only DB operations)
+      // ============================================================
+      if (orderCheck.shouldExpire && existingAppt.paymentId) {
+        console.log(
+          `[PAYMENT:${requestId}] Expiring old order:`,
+          existingAppt.paymentId
+        );
+        const txStart = Date.now();
+        try {
+          await paymentService.expireOldOrder(appointmentId);
+          console.log(
+            `[PAYMENT:${requestId}] ✅ Expired old order in ${
+              Date.now() - txStart
+            }ms`
+          );
+        } catch (expireError: any) {
+          console.error(
+            `[PAYMENT:${requestId}] ⚠️ Failed to expire old order (non-critical):`,
+            {
+              error: expireError.message,
+              code: expireError.code,
+            }
+          );
+          // Continue - this is non-critical, we'll create a new order anyway
+        }
+      }
+
+      // ============================================================
+      // STEP 4: Create Razorpay order (OUTSIDE transaction - external API call)
+      // ============================================================
+      const amountInPaise = Math.round(planPrice * 100);
+      console.log(`[PAYMENT:${requestId}] Creating Razorpay order:`, {
         amountInPaise,
         planPrice,
-        appointmentId: appointment.id,
+        appointmentId: existingAppt.id,
       });
-
-      // Generate receipt (max 40 chars for Razorpay)
-      // Format: rcpt_<short-appointment-id>_<timestamp>
-      const shortApptId = appointment.id.slice(-8); // Last 8 chars of UUID
-      const timestamp = Date.now().toString().slice(-10); // Last 10 digits of timestamp
-      const receipt = `rcpt_${shortApptId}_${timestamp}`; // Max length: 5 + 8 + 1 + 10 = 24 chars
 
       let order;
       try {
-        order = await razorpay.orders.create({
+        order = await paymentService.createRazorpayOrder({
           amount: amountInPaise,
-          currency: "INR",
-          receipt: receipt,
-          notes: {
-            appointmentId: appointment.id,
-            planSlug: appointment.planSlug,
-            planName: appointment.planName,
-            userId: userId,
-          },
+          appointmentId: existingAppt.id,
+          planSlug: existingAppt.planSlug,
+          planName: existingAppt.planName,
+          userId,
         });
+        console.log(
+          `[PAYMENT:${requestId}] ✅ Razorpay order created:`,
+          order.id
+        );
       } catch (razorpayError: any) {
         console.error(
-          "[PAYMENT] Razorpay order creation failed:",
-          razorpayError
+          `[PAYMENT:${requestId}] ❌ Razorpay order creation failed:`,
+          {
+            error: razorpayError?.error?.description || razorpayError.message,
+            code: razorpayError?.error?.code,
+          }
         );
         return res.status(500).json({
           success: false,
@@ -181,62 +337,61 @@ export async function createOrderHandler(req: Request, res: Response) {
         });
       }
 
-      // Update appointment with payment order ID in a transaction
+      // ============================================================
+      // STEP 5: Link order to appointment (SHORT transaction - only DB operations)
+      // ============================================================
+      const txStart = Date.now();
       try {
-        await prisma.$transaction(async (tx) => {
-          // Double-check appointment status hasn't changed
-          const currentAppt = await tx.appointment.findUnique({
-            where: { id: appointment.id },
-            select: { status: true, paymentId: true },
-          });
-
-          if (!currentAppt) {
-            throw new Error("Appointment not found");
-          }
-
-          if (currentAppt.status !== "PENDING") {
-            throw new Error(
-              "Appointment status changed. Cannot update payment."
-            );
-          }
-
-          if (currentAppt.paymentId) {
-            throw new Error("Payment order already exists");
-          }
-
-          // Update appointment with payment order ID
-          await tx.appointment.update({
-            where: { id: appointment.id },
-            data: {
-              paymentId: order.id,
-              amount: planPrice, // Store in rupees (not paise) in database
-              paymentStatus: "PENDING",
-            } as any,
-          });
-        });
+        await paymentService.linkOrderToAppointment(
+          appointmentId,
+          order.id,
+          planPrice
+        );
+        console.log(
+          `[PAYMENT:${requestId}] ✅ Linked order to appointment in ${
+            Date.now() - txStart
+          }ms`
+        );
       } catch (updateError: any) {
         console.error(
-          "[PAYMENT] Failed to update appointment with order ID:",
-          updateError
+          `[PAYMENT:${requestId}] ❌ Failed to link order (took ${
+            Date.now() - txStart
+          }ms):`,
+          {
+            error: updateError.message,
+            code: updateError.code,
+          }
         );
+
+        if (
+          updateError instanceof Prisma.PrismaClientKnownRequestError &&
+          updateError.code === "P2028"
+        ) {
+          console.error(
+            `[PAYMENT:${requestId}] Transaction timeout - database is locked or overloaded`
+          );
+        }
+
         // Order was created but appointment update failed - this is a critical error
         // In production, you might want to cancel the Razorpay order here
         return res.status(500).json({
           success: false,
           error:
-            "Failed to link payment order to appointment. Please contact support.",
+            "Failed to link payment order to appointment. Please try again in a moment.",
         });
       }
 
-      console.log("==========================================");
-      console.log("[PAYMENT ORDER CREATED] ✅ Order Created Successfully:");
-      console.log("  Order ID (Razorpay Order ID):", order.id);
-      console.log("  Order Amount (in paise):", order.amount);
-      console.log("  Order Currency:", order.currency);
-      console.log("  Order Receipt:", order.receipt);
-      console.log("  Order Status:", order.status);
-      console.log("  Appointment ID:", appointment.id);
-      console.log("==========================================");
+      const totalTime = Date.now() - startTime;
+      console.log(
+        `[PAYMENT:${requestId}] ✅ Order created successfully in ${totalTime}ms:`,
+        {
+          orderId: order.id,
+          amount: order.amount,
+          currency: order.currency,
+          appointmentId,
+          duration: `${totalTime}ms`,
+        }
+      );
 
       return res.json({
         success: true,
@@ -247,12 +402,12 @@ export async function createOrderHandler(req: Request, res: Response) {
           receipt: order.receipt,
           status: order.status,
         },
-        appointmentId: appointment.id,
+        appointmentId: appointmentId,
       });
     }
 
     // OLD FLOW: Create new appointment (for backward compatibility - not recommended)
-    // IMPORTANT: Check if appointment already exists to prevent duplicates
+    // This flow is deprecated - use appointmentId flow instead
     if (!slotId || !patientId || !planSlug || !appointmentMode) {
       return res.status(400).json({
         success: false,
@@ -269,12 +424,16 @@ export async function createOrderHandler(req: Request, res: Response) {
     }
 
     const modeEnum = normalizeAppointmentMode(appointmentMode);
-    const patient = await prisma.patientDetials.findFirst({
-      where: {
-        id: patientId,
-        userId,
-      },
-    });
+
+    // ============================================================
+    // STEP 1: Validate inputs (OUTSIDE transaction)
+    // ============================================================
+    const [patient, slot] = await Promise.all([
+      prisma.patientDetials.findFirst({
+        where: { id: patientId, userId },
+      }),
+      prisma.slot.findUnique({ where: { id: slotId } }),
+    ]);
 
     if (!patient) {
       return res.status(403).json({
@@ -282,10 +441,6 @@ export async function createOrderHandler(req: Request, res: Response) {
         error: "Patient does not belong to current user",
       });
     }
-
-    const slot = await prisma.slot.findUnique({
-      where: { id: slotId },
-    });
 
     if (!slot) {
       return res.status(400).json({
@@ -315,21 +470,20 @@ export async function createOrderHandler(req: Request, res: Response) {
       });
     }
 
-    // CRITICAL: Check if appointment already exists for this slot/patient/user combination
-    // This prevents duplicate appointments when payment is confirmed
+    // Check if appointment already exists (OUTSIDE transaction)
     const existingAppointment = await prisma.appointment.findFirst({
       where: {
         slotId: slot.id,
         patientId: patientId,
         userId: userId,
-        isArchived: false, // Only check non-archived appointments
+        isArchived: false,
       },
       include: {
         patient: true,
         slot: true,
       },
       orderBy: {
-        createdAt: "desc", // Get the most recent one
+        createdAt: "desc",
       },
     });
 
@@ -339,7 +493,6 @@ export async function createOrderHandler(req: Request, res: Response) {
         existingAppointment.id
       );
 
-      // If appointment is already CONFIRMED, return error
       if (existingAppointment.status === "CONFIRMED") {
         return res.status(400).json({
           success: false,
@@ -348,101 +501,41 @@ export async function createOrderHandler(req: Request, res: Response) {
         });
       }
 
-      // If appointment is PENDING, use it instead of creating a new one
       appointment = existingAppointment;
-      console.log(
-        "[PAYMENT] Using existing PENDING appointment:",
-        appointment.id
-      );
-    } else {
-      // No existing appointment found, proceed with creating new one
-      const amountInPaise = Math.round(plan.price * 100);
-      const receipt = `rcpt_${Date.now()}`;
 
-      let order;
-      try {
-        order = await razorpay.orders.create({
-          amount: amountInPaise,
-          currency: "INR",
-          receipt: receipt,
-        });
-      } catch (razorpayError: any) {
-        console.error(
-          "[PAYMENT] Razorpay order creation failed:",
-          razorpayError
-        );
-        return res.status(500).json({
-          success: false,
-          error:
-            razorpayError?.error?.description ||
-            "Failed to create payment order",
-        });
-      }
+      // Check if existing appointment has a valid order
+      if (appointment.paymentId && appointment.paymentId.startsWith("order_")) {
+        try {
+          const existingOrder = await razorpay.orders.fetch(
+            appointment.paymentId
+          );
+          const orderCreatedAt = existingOrder.created_at * 1000;
+          const hoursSinceCreation =
+            (Date.now() - orderCreatedAt) / (1000 * 60 * 60);
 
-      const doctorId = await getSingleAdminId();
-
-      try {
-        appointment = await prisma.appointment.create({
-          data: {
-            userId,
-            doctorId,
-            patientId,
-            slotId: slot.id,
-            startAt: slot.startAt,
-            endAt: slot.endAt,
-            paymentId: order.id,
-            amount: plan.price, // Store in rupees
-            status: "PENDING",
-            mode: modeEnum,
-            planSlug,
-            planName: plan.name,
-            planPrice: plan.price,
-            planDuration: plan.duration,
-            planPackageName: plan.packageName,
-          },
-        });
-      } catch (err: any) {
-        // Handle unique constraint -> slot double booking race condition
-        if (
-          err instanceof Prisma.PrismaClientKnownRequestError &&
-          err.code === "P2002" &&
-          Array.isArray(err.meta?.target) &&
-          err.meta?.target.includes("slotId")
-        ) {
-          return res.status(409).json({
-            success: false,
-            error: "Slot already booked by another user",
-          });
+          if (hoursSinceCreation <= 24 && existingOrder.status === "created") {
+            return res.json({
+              success: true,
+              order: {
+                id: existingOrder.id,
+                amount: existingOrder.amount,
+                currency: existingOrder.currency,
+                receipt: existingOrder.receipt,
+                status: existingOrder.status,
+              },
+              appointmentId: appointment.id,
+            });
+          }
+        } catch (error: any) {
+          console.error("[PAYMENT] Failed to fetch existing order:", error);
+          // Continue to create new order
         }
-        throw err;
       }
     }
 
-    // Handle return for both existing and new appointments
-    if (appointment.paymentId && appointment.paymentId.startsWith("order_")) {
-      // Appointment already has a payment order, fetch it
-      try {
-        const existingOrder = await razorpay.orders.fetch(
-          appointment.paymentId
-        );
-        return res.json({
-          success: true,
-          order: {
-            id: existingOrder.id,
-            amount: existingOrder.amount,
-            currency: existingOrder.currency,
-            receipt: existingOrder.receipt,
-            status: existingOrder.status,
-          },
-          appointmentId: appointment.id,
-        });
-      } catch (error: any) {
-        console.error("[PAYMENT] Failed to fetch existing order:", error);
-        // If order fetch fails, create a new one
-      }
-    }
-
-    // Create new order for appointment (either new or existing without order)
+    // ============================================================
+    // STEP 2: Create Razorpay order (OUTSIDE transaction)
+    // ============================================================
     const amountInPaise = Math.round(plan.price * 100);
     const receipt = `rcpt_${Date.now()}`;
 
@@ -452,16 +545,14 @@ export async function createOrderHandler(req: Request, res: Response) {
         amount: amountInPaise,
         currency: "INR",
         receipt: receipt,
+        notes: {
+          slotId: slot.id,
+          patientId: patientId,
+          userId: userId,
+          planSlug: planSlug,
+        },
       });
-
-      // Update appointment with payment order ID
-      await prisma.appointment.update({
-        where: { id: appointment.id },
-        data: {
-          paymentId: order.id,
-          paymentStatus: "PENDING",
-        } as any,
-      });
+      console.log("[PAYMENT] ✅ Razorpay order created:", order.id);
     } catch (razorpayError: any) {
       console.error("[PAYMENT] Razorpay order creation failed:", razorpayError);
       return res.status(500).json({
@@ -469,6 +560,97 @@ export async function createOrderHandler(req: Request, res: Response) {
         error:
           razorpayError?.error?.description || "Failed to create payment order",
       });
+    }
+
+    // ============================================================
+    // STEP 3: Create or update appointment (SHORT transaction)
+    // ============================================================
+    const txStart = Date.now();
+    try {
+      if (appointment) {
+        // Update existing appointment
+        await prisma.$transaction(
+          async (tx) => {
+            await tx.appointment.update({
+              where: { id: appointment.id },
+              data: {
+                paymentId: order.id,
+                amount: plan.price,
+                paymentStatus: "PENDING",
+              } as any,
+            });
+          },
+          {
+            timeout: 3000,
+            maxWait: 2000,
+          }
+        );
+      } else {
+        // Create new appointment
+        const doctorId = await getSingleAdminId();
+        appointment = await prisma.$transaction(
+          async (tx) => {
+            return await tx.appointment.create({
+              data: {
+                userId,
+                doctorId,
+                patientId,
+                slotId: slot.id,
+                startAt: slot.startAt,
+                endAt: slot.endAt,
+                paymentId: order.id,
+                amount: plan.price,
+                status: "PENDING",
+                mode: modeEnum,
+                planSlug,
+                planName: plan.name,
+                planPrice: plan.price,
+                planDuration: plan.duration,
+                planPackageName: plan.packageName,
+              },
+            });
+          },
+          {
+            timeout: 3000,
+            maxWait: 2000,
+          }
+        );
+      }
+      console.log(
+        `[PAYMENT] ✅ ${appointment ? "Updated" : "Created"} appointment in ${
+          Date.now() - txStart
+        }ms`
+      );
+    } catch (err: any) {
+      console.error(
+        `[PAYMENT] ❌ Failed to ${
+          appointment ? "update" : "create"
+        } appointment (took ${Date.now() - txStart}ms):`,
+        err
+      );
+
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2028"
+      ) {
+        console.error(
+          "[PAYMENT] Transaction timeout - database is locked or overloaded"
+        );
+      }
+
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002" &&
+        Array.isArray(err.meta?.target) &&
+        err.meta?.target.includes("slotId")
+      ) {
+        return res.status(409).json({
+          success: false,
+          error: "Slot already booked by another user",
+        });
+      }
+
+      throw err;
     }
 
     return res.json({
@@ -483,11 +665,16 @@ export async function createOrderHandler(req: Request, res: Response) {
       appointmentId: appointment.id,
     });
   } catch (err: any) {
-    console.error("[PAYMENT] Create order error:", {
-      message: err.message,
-      stack: err.stack,
-      code: err.code,
-    });
+    const totalTime = Date.now() - startTime;
+    console.error(
+      `[PAYMENT:${requestId}] ❌ Create order error (${totalTime}ms):`,
+      {
+        message: err.message,
+        code: err.code,
+        name: err.name,
+        stack: err.stack?.split("\n")[0], // Only log first line of stack
+      }
+    );
 
     // Handle Prisma errors
     if (err instanceof Prisma.PrismaClientKnownRequestError) {
@@ -497,25 +684,52 @@ export async function createOrderHandler(req: Request, res: Response) {
           error: "Slot already booked",
         });
       }
+      if (err.code === "P2028") {
+        return res.status(503).json({
+          success: false,
+          error: "Database operation timed out. Please try again in a moment.",
+        });
+      }
+    }
+
+    // Handle network/API errors
+    if (err.code === "ETIMEDOUT" || err.code === "ECONNRESET") {
+      return res.status(503).json({
+        success: false,
+        error: "Payment service temporarily unavailable. Please try again.",
+      });
     }
 
     return res.status(500).json({
       success: false,
-      error: err.message || "Something went wrong. Please try again.",
+      error:
+        "An unexpected error occurred. Please try again or contact support.",
     });
   }
 }
 
 /**
  * Verify Razorpay payment signature and confirm appointment
- * This is called from the frontend after successful payment
+ * Production-grade implementation with:
+ * - Payment state machine validation
+ * - Idempotency checks
+ * - Row-level locking for concurrency safety
+ * - Proper error handling
  */
 export async function verifyPaymentHandler(req: Request, res: Response) {
+  const requestId = `req_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 9)}`;
+  const startTime = Date.now();
+
   try {
-    console.log("[PAYMENT] Verify payment request received");
+    console.log(`[PAYMENT:${requestId}] Verify payment request received`);
+
     const userId = req.user?.id;
     if (!userId) {
-      console.error("[PAYMENT] Unauthenticated verification request");
+      console.error(
+        `[PAYMENT:${requestId}] Unauthenticated verification request`
+      );
       return res.status(401).json({
         success: false,
         error: "Unauthenticated. Please login again.",
@@ -525,36 +739,30 @@ export async function verifyPaymentHandler(req: Request, res: Response) {
     const { orderId, paymentId, signature } = req.body;
 
     if (!orderId || !paymentId || !signature) {
-      console.error("[PAYMENT] Missing verification fields");
+      console.error(`[PAYMENT:${requestId}] Missing verification fields`);
       return res.status(400).json({
         success: false,
         error: "Missing required fields: orderId, paymentId, signature",
       });
     }
 
-    // Console log payment details with proper labels
-    console.log("==========================================");
-    console.log("[PAYMENT VERIFICATION] Payment Details Received:");
-    console.log("  Order ID (Razorpay Order ID):", orderId);
-    console.log("  Payment ID (Razorpay Payment ID):", paymentId);
-    console.log("  Payment Signature:", signature);
-    console.log("==========================================");
+    console.log(`[PAYMENT:${requestId}] Payment verification request:`, {
+      orderId,
+      paymentId,
+      userId,
+    });
 
     // Verify Razorpay signature
-    const body = `${orderId}|${paymentId}`;
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET!)
-      .update(body)
-      .digest("hex");
+    const isValidSignature = paymentService.verifyPaymentSignature(
+      orderId,
+      paymentId,
+      signature,
+      process.env.RAZORPAY_KEY_SECRET!
+    );
 
-    console.log("[PAYMENT VERIFICATION] Signature Verification:");
-    console.log("  Expected Signature:", expectedSignature);
-    console.log("  Received Signature:", signature);
-    console.log("  Signature Match:", expectedSignature === signature);
-
-    if (expectedSignature !== signature) {
+    if (!isValidSignature) {
       console.error(
-        "[PAYMENT VERIFICATION] ❌ Signature mismatch - Payment verification failed"
+        `[PAYMENT:${requestId}] ❌ Signature mismatch - Payment verification failed`
       );
       return res.status(400).json({
         success: false,
@@ -562,122 +770,40 @@ export async function verifyPaymentHandler(req: Request, res: Response) {
       });
     }
 
-    console.log("[PAYMENT VERIFICATION] ✅ Signature verified successfully");
-    console.log(
-      "[PAYMENT VERIFICATION] Finding appointment for order:",
-      orderId
+    console.log(`[PAYMENT:${requestId}] ✅ Signature verified successfully`);
+
+    // Find appointment by payment order ID
+    let appointment = await paymentService.findAppointmentByOrderId(
+      orderId,
+      userId
     );
 
-    // Find appointment by payment order ID with patient and doctor details
-    let appointment = await prisma.appointment.findFirst({
-      where: {
-        paymentId: orderId,
-        userId, // Ensure appointment belongs to the user
-        isArchived: false, // Only check non-archived appointments
-      },
-      include: {
-        slot: true,
-        patient: {
-          select: {
-            id: true,
-            name: true,
-            phone: true,
-            email: true,
-          },
-        },
-        doctor: {
-          select: {
-            id: true,
-            name: true,
-            phone: true,
-            email: true,
-          },
-        },
-      },
-    });
-
-    // CRITICAL FALLBACK: If appointment not found by paymentId, check for PENDING appointments
-    // that might have been created but not yet linked with paymentId
-    // This handles edge cases where appointment was created but paymentId wasn't properly saved
     if (!appointment) {
-      console.warn(
-        "[PAYMENT] ⚠️ Appointment not found by paymentId, checking for PENDING appointments to link..."
+      console.error(
+        `[PAYMENT:${requestId}] Appointment not found for order:`,
+        orderId
       );
-
-      // Try to find the appointment by extracting slot/patient info from Razorpay order notes
-      try {
-        const razorpayOrder = await razorpay.orders.fetch(orderId);
-        const appointmentIdFromNotes = razorpayOrder.notes?.appointmentId;
-
-        if (appointmentIdFromNotes) {
-          appointment = await prisma.appointment.findFirst({
-            where: {
-              id: appointmentIdFromNotes,
-              userId,
-              isArchived: false,
-            },
-            include: {
-              slot: true,
-              patient: {
-                select: {
-                  id: true,
-                  name: true,
-                  phone: true,
-                  email: true,
-                },
-              },
-              doctor: {
-                select: {
-                  id: true,
-                  name: true,
-                  phone: true,
-                  email: true,
-                },
-              },
-            },
-          });
-
-          if (appointment && appointment.status === "PENDING") {
-            // Link the paymentId to this appointment if it's not already set
-            if (!appointment.paymentId) {
-              await prisma.appointment.update({
-                where: { id: appointment.id },
-                data: { paymentId: orderId },
-              });
-              console.log(
-                `[PAYMENT] ✅ Linked paymentId ${orderId} to appointment ${appointment.id}`
-              );
-            }
-          }
-        }
-      } catch (fetchError: any) {
-        console.error(
-          "[PAYMENT] Failed to fetch Razorpay order for fallback lookup:",
-          fetchError
-        );
-      }
-    }
-
-    if (!appointment) {
-      console.error("[PAYMENT] Appointment not found for order:", orderId);
       return res.status(404).json({
         success: false,
         error: "Appointment not found for this payment order",
       });
     }
 
-    // Type assertion for paymentStatus
-    const appointmentWithPaymentStatus = appointment as any;
+    const currentPaymentStatus = normalizePaymentStatus(
+      (appointment as any).paymentStatus
+    );
 
-    console.log("[PAYMENT] Appointment found:", {
+    console.log(`[PAYMENT:${requestId}] Appointment found:`, {
       id: appointment.id,
       currentStatus: appointment.status,
-      paymentStatus: appointmentWithPaymentStatus.paymentStatus,
+      paymentStatus: currentPaymentStatus,
     });
 
-    // Check if already confirmed (idempotency)
+    // Idempotency check: if already confirmed, return success
     if (appointment.status === "CONFIRMED") {
-      console.log("[PAYMENT] Appointment already confirmed");
+      console.log(
+        `[PAYMENT:${requestId}] ✅ Appointment already confirmed (idempotent)`
+      );
       return res.json({
         success: true,
         alreadyConfirmed: true,
@@ -685,12 +811,35 @@ export async function verifyPaymentHandler(req: Request, res: Response) {
       });
     }
 
-    // Update appointment status in a transaction to prevent race conditions
+    // Validate state transition
+    if (!isValidTransition(currentPaymentStatus, PaymentStatus.PAID)) {
+      console.error(`[PAYMENT:${requestId}] ❌ Invalid state transition:`, {
+        from: currentPaymentStatus,
+        to: PaymentStatus.PAID,
+      });
+      return res.status(400).json({
+        success: false,
+        error: `Cannot transition payment from ${currentPaymentStatus} to PAID`,
+      });
+    }
+
+    // Update appointment status in a transaction with row-level locking
+    console.log(
+      `[PAYMENT:${requestId}] Starting transaction for appointment:`,
+      appointment.id
+    );
+    const transactionStartTime = Date.now();
+
     await prisma.$transaction(
       async (tx) => {
-        // Use raw query with FOR UPDATE to lock the row and prevent concurrent updates
-        // This ensures only one request can update the appointment at a time
-        // DATA INTEGRITY: Also check paymentStatus to prevent duplicate payment processing
+        console.log(
+          `[PAYMENT:${requestId}] Transaction started (${
+            Date.now() - transactionStartTime
+          }ms since request)`
+        );
+
+        // Row-level locking to prevent concurrent updates
+        const lockStartTime = Date.now();
         const lockedAppt = await tx.$queryRaw<
           Array<{
             id: string;
@@ -704,109 +853,81 @@ export async function verifyPaymentHandler(req: Request, res: Response) {
           WHERE id = ${appointment.id}
           FOR UPDATE
         `;
+        console.log(
+          `[PAYMENT:${requestId}] Row lock acquired in ${
+            Date.now() - lockStartTime
+          }ms`
+        );
 
         if (!lockedAppt || lockedAppt.length === 0) {
-          throw new Error("Appointment not found");
+          throw new Error("Appointment not found during transaction");
         }
 
         const apptStatus = lockedAppt[0].status;
-        const apptPaymentStatus = lockedAppt[0].paymentStatus;
+        const apptPaymentStatus = normalizePaymentStatus(
+          lockedAppt[0].paymentStatus
+        );
         const apptSlotId = lockedAppt[0].slotId;
 
-        // DATA INTEGRITY: Idempotency check - if already confirmed, return early
+        // Idempotency check - if already confirmed, return early
         if (apptStatus === "CONFIRMED") {
           console.log(
-            "[PAYMENT] Appointment already confirmed (race condition prevented)"
+            `[PAYMENT:${requestId}] Appointment already confirmed (race condition prevented)`
           );
           return;
         }
 
-        // DATA INTEGRITY: Check payment status to prevent duplicate payment processing
-        if (apptPaymentStatus === "SUCCESS") {
-          console.warn(
-            "[PAYMENT] Payment already processed (paymentStatus is SUCCESS)"
-          );
+        // Validate state transition
+        if (!isValidTransition(apptPaymentStatus, PaymentStatus.PAID)) {
+          console.error(`[PAYMENT:${requestId}] ❌ Invalid state transition:`, {
+            from: apptPaymentStatus,
+            to: PaymentStatus.PAID,
+          });
           throw new Error(
-            "Payment has already been processed for this appointment. Cannot process duplicate payment."
+            `Cannot transition payment from ${apptPaymentStatus} to PAID. Invalid state transition.`
           );
         }
 
-        // DATA INTEGRITY: Additional validation - ensure appointment is still in PENDING status
-        // This prevents confirming cancelled or completed appointments
+        // Additional validation - ensure appointment is still in PENDING status
         if (apptStatus !== "PENDING") {
           throw new Error(
             `Cannot confirm appointment in ${apptStatus} status. Expected PENDING. Payment verification aborted.`
           );
         }
 
-        // Update appointment to CONFIRMED and store payment details
-        // Note: paymentId field stores Razorpay Order ID (orderId)
-        //       notes field stores Razorpay Payment ID (paymentId)
-        // Clear bookingProgress since appointment is now confirmed (no longer pending)
+        // Update appointment to CONFIRMED with proper state transition
         await tx.appointment.update({
           where: { id: appointment.id },
           data: {
             status: "CONFIRMED",
-            paymentStatus: "SUCCESS",
-            bookingProgress: null, // Clear booking progress - appointment is confirmed
-            // paymentId field already contains orderId (set during order creation)
-            // Store Razorpay Payment ID in notes field
-            notes: paymentId, // Razorpay Payment ID (pay_xxxxx)
+            paymentStatus: PaymentStatus.PAID,
+            bookingProgress: null,
+            notes: paymentId, // Store Razorpay Payment ID
           } as any,
         });
 
-        // CRITICAL: Archive any other PENDING appointments for the same slot/user/patient
+        console.log(
+          `[PAYMENT:${requestId}] ✅ Payment state transition: ${apptPaymentStatus} → ${PaymentStatus.PAID}`
+        );
+
+        // CRITICAL: Archive any other PENDING appointments for the same logical booking
         // This prevents duplicate PENDING appointments from remaining after confirmation
-        // First, fetch the appointment details we need for cleanup
-        const confirmedAppt = await tx.appointment.findUnique({
-          where: { id: appointment.id },
-          select: { userId: true, patientId: true, slotId: true },
+        // Matches by: userId, patientId, startAt (slotTime), planSlug
+        // Use the appointment object from earlier query (before transaction) which has all needed fields
+        await archiveDuplicatePendingAppointments(tx, appointment.id, {
+          userId: appointment.userId,
+          patientId: appointment.patientId,
+          startAt: appointment.startAt,
+          planSlug: appointment.planSlug || "",
         });
 
-        if (confirmedAppt && confirmedAppt.slotId) {
-          const duplicatePendingAppointments = await tx.appointment.findMany({
-            where: {
-              slotId: confirmedAppt.slotId,
-              userId: confirmedAppt.userId,
-              patientId: confirmedAppt.patientId,
-              status: "PENDING",
-              id: { not: appointment.id }, // Exclude the one we just confirmed
-              isArchived: false,
-            },
-          });
-
-          if (duplicatePendingAppointments.length > 0) {
-            console.log(
-              `[PAYMENT] 🧹 Archiving ${duplicatePendingAppointments.length} duplicate PENDING appointment(s) for the same slot/user/patient`
-            );
-
-            await tx.appointment.updateMany({
-              where: {
-                id: {
-                  in: duplicatePendingAppointments.map((apt: any) => apt.id),
-                },
-              },
-              data: {
-                isArchived: true,
-                archivedAt: new Date(),
-              },
-            });
-
-            console.log(
-              `[PAYMENT] ✅ Archived duplicate appointments:`,
-              duplicatePendingAppointments.map((apt: any) => apt.id)
-            );
-          }
-        }
-
-        console.log("==========================================");
-        console.log("[PAYMENT SUCCESS] Payment Verified and Stored:");
-        console.log("  Appointment ID:", appointment.id);
-        console.log("  Order ID (Razorpay Order ID):", orderId);
-        console.log("  Payment ID (Razorpay Payment ID):", paymentId);
-        console.log("  Payment Status: SUCCESS");
-        console.log("  Appointment Status: CONFIRMED");
-        console.log("==========================================");
+        console.log(`[PAYMENT:${requestId}] ✅ Payment verified and stored:`, {
+          appointmentId: appointment.id,
+          orderId,
+          paymentId,
+          paymentStatus: PaymentStatus.PAID,
+          appointmentStatus: "CONFIRMED",
+        });
 
         // Mark slot as booked if slot exists
         // This is critical: slot must be marked as booked when payment succeeds
@@ -824,38 +945,38 @@ export async function verifyPaymentHandler(req: Request, res: Response) {
               where: { id: apptSlotId },
               data: { isBooked: true },
             });
-            console.log("==========================================");
-            console.log("[PAYMENT SUCCESS] ✅ Slot Marked as Booked:");
-            console.log("  Slot ID:", apptSlotId);
-            console.log("  Slot isBooked:", updatedSlot.isBooked);
-            console.log("  Slot Start Time:", updatedSlot.startAt);
-            console.log("  Slot Mode:", updatedSlot.mode);
-            console.log("==========================================");
+            console.log(`[PAYMENT:${requestId}] ✅ Slot marked as booked:`, {
+              slotId: apptSlotId,
+              isBooked: updatedSlot.isBooked,
+            });
           } catch (slotError: any) {
             // Slot may already be booked (race condition) - log but don't fail
             // This can happen if webhook processed payment before verifyPaymentHandler
             console.warn(
-              "[PAYMENT] Slot update failed (may already be booked):",
+              `[PAYMENT:${requestId}] ⚠️ Slot update failed (may already be booked):`,
               slotError.message
             );
-            // Still log the slot ID for debugging
-            console.log("[PAYMENT] Attempted to book slot:", apptSlotId);
           }
         } else {
           console.log(
-            "[PAYMENT] No slot ID found for appointment - skipping slot booking"
+            `[PAYMENT:${requestId}] No slot ID found - skipping slot booking`
           );
         }
+
+        console.log(
+          `[PAYMENT:${requestId}] ✅ Appointment confirmed successfully`
+        );
       },
       {
-        timeout: 10000, // 10 second timeout
+        timeout: 20000, // 20 second timeout (increased from 10s to handle slow queries)
+        maxWait: 5000, // Max 5 seconds to wait for transaction to start
         isolationLevel: "ReadCommitted", // Prevent dirty reads
       }
     );
 
+    const totalTxTime = Date.now() - transactionStartTime;
     console.log(
-      "[PAYMENT] Appointment CONFIRMED via verify API:",
-      appointment.id
+      `[PAYMENT:${requestId}] ✅ Transaction completed in ${totalTxTime}ms`
     );
 
     // Send WhatsApp notifications after successful payment confirmation
@@ -881,19 +1002,86 @@ export async function verifyPaymentHandler(req: Request, res: Response) {
       console.error("==========================================");
     }
 
+    // Generate invoice after payment confirmation (non-blocking)
+    try {
+      console.log(
+        "[PAYMENT] Generating invoice for appointment:",
+        appointment.id
+      );
+      const invoiceResult = await generateInvoiceForAppointment(appointment.id);
+      if (invoiceResult.success) {
+        console.log(
+          "[PAYMENT] ✅ Invoice generated successfully:",
+          invoiceResult.invoice?.invoiceNumber
+        );
+      } else {
+        console.error(
+          "[PAYMENT] ❌ Invoice generation failed (non-blocking):",
+          invoiceResult.error
+        );
+      }
+    } catch (invoiceError: any) {
+      // Log error but don't fail the payment confirmation
+      console.error("==========================================");
+      console.error("[PAYMENT] ❌ Invoice generation failed (non-blocking):");
+      console.error("  Error:", invoiceError.message);
+      console.error("  Stack:", invoiceError.stack);
+      console.error("==========================================");
+    }
+
+    const totalTime = Date.now() - startTime;
+    console.log(
+      `[PAYMENT:${requestId}] ✅ Payment verified successfully in ${totalTime}ms`
+    );
+
     return res.json({
       success: true,
       message: "Payment verified successfully. Your appointment is confirmed.",
     });
   } catch (err: any) {
-    console.error("[PAYMENT] verifyPaymentHandler error:", {
-      message: err.message,
-      stack: err.stack,
-    });
+    const totalTime = Date.now() - startTime;
+    console.error(
+      `[PAYMENT:${requestId}] ❌ Verify payment error (${totalTime}ms):`,
+      {
+        message: err.message,
+        code: err.code,
+        name: err.name,
+      }
+    );
+
+    // Handle specific error types
+    if (
+      err.message?.includes("Transaction") ||
+      err.message?.includes("timeout") ||
+      err.code === "P2024" ||
+      err.code === "P2028"
+    ) {
+      return res.status(503).json({
+        success: false,
+        error:
+          "Payment verification is taking longer than expected. Please wait a moment and check your appointment status.",
+      });
+    }
+
+    if (err.code === "P1001" || err.code === "P1002" || err.code === "P1017") {
+      return res.status(503).json({
+        success: false,
+        error: "Database connection issue. Please try again in a moment.",
+      });
+    }
+
+    // Check for invalid state transition errors
+    if (err.message?.includes("Invalid state transition")) {
+      return res.status(400).json({
+        success: false,
+        error: err.message,
+      });
+    }
+
     return res.status(500).json({
       success: false,
       error:
-        "Internal server error. Please contact support with your payment ID.",
+        "An unexpected error occurred. Please contact support with your payment ID.",
     });
   }
 }
@@ -940,7 +1128,7 @@ export async function getExistingOrderHandler(req: Request, res: Response) {
         paymentId: true,
         planPrice: true,
         status: true,
-        // paymentStatus exists in schema but Prisma types may be stale
+        paymentStatus: true, // Include paymentStatus
       } as any,
     })) as any; // Type assertion to handle paymentStatus field
 
@@ -952,11 +1140,22 @@ export async function getExistingOrderHandler(req: Request, res: Response) {
       });
     }
 
-    // Check if appointment is already confirmed
+    // Check if appointment is already confirmed (database is source of truth)
     if (appointment.status === "CONFIRMED") {
       return res.status(400).json({
         success: false,
         error: "Appointment is already confirmed",
+      });
+    }
+
+    // Check payment status in database first (source of truth)
+    const dbPaymentStatus = normalizePaymentStatus(appointment.paymentStatus);
+    if (dbPaymentStatus === PaymentStatus.PAID) {
+      console.log("[PAYMENT] Payment already completed in database");
+      return res.status(400).json({
+        success: false,
+        error: "Payment already completed for this appointment.",
+        shouldCreateNew: false,
       });
     }
 
@@ -975,29 +1174,120 @@ export async function getExistingOrderHandler(req: Request, res: Response) {
     let orderDetails;
     try {
       orderDetails = await razorpay.orders.fetch(appointment.paymentId);
+      console.log("[PAYMENT] Razorpay order status:", {
+        orderStatus: orderDetails.status,
+        dbPaymentStatus,
+      });
+
+      // If Razorpay says paid but our DB says PENDING - data inconsistency
+      // Allow retry (webhook/verifyPayment will sync the status)
+      if (
+        orderDetails.status === "paid" &&
+        dbPaymentStatus === PaymentStatus.PENDING
+      ) {
+        console.warn(
+          "[PAYMENT] ⚠️ Payment status mismatch - Razorpay says paid but DB says PENDING. Allowing retry."
+        );
+        // Clear the order and allow creating a new one
+        await prisma.appointment.update({
+          where: { id: appointment.id },
+          data: {
+            paymentId: null,
+            paymentStatus: PaymentStatus.PENDING,
+          } as any,
+        });
+        return res.status(404).json({
+          success: false,
+          error:
+            "Previous payment order status unclear. A new order will be created for you.",
+          shouldCreateNew: true,
+        });
+      }
+
+      // If Razorpay says paid and DB also says PAID (or confirmed), return error
+      if (orderDetails.status === "paid") {
+        console.log("[PAYMENT] Order already paid in Razorpay and database");
+        return res.status(400).json({
+          success: false,
+          error:
+            "This payment order has already been completed. Please check your appointments.",
+          shouldCreateNew: false,
+        });
+      }
+
+      // Check if order has expired (Razorpay orders are valid for limited time)
+      // Razorpay doesn't explicitly mark orders as "expired", but they become invalid after some time
+      // We can check the created_at timestamp and reject orders older than 24 hours
+      const orderCreatedAt = orderDetails.created_at * 1000; // Convert to milliseconds
+      const now = Date.now();
+      const hoursSinceCreation = (now - orderCreatedAt) / (1000 * 60 * 60);
+
+      if (hoursSinceCreation > 24) {
+        console.warn(
+          `[PAYMENT] Order is ${hoursSinceCreation.toFixed(
+            1
+          )} hours old - likely expired`
+        );
+        // Clear the expired paymentId from appointment so user can create new order
+        await prisma.appointment.update({
+          where: { id: appointment.id },
+          data: {
+            paymentId: null, // Clear expired order
+            paymentStatus: "PENDING",
+          } as any,
+        });
+        console.log(
+          "[PAYMENT] Cleared expired order from appointment, user can create new order"
+        );
+        return res.status(410).json({
+          // 410 Gone
+          success: false,
+          error:
+            "Your previous payment order has expired. A new order will be created for you.",
+          shouldCreateNew: true, // Signal frontend to create new order
+          expired: true,
+        });
+      }
+
+      // Order is valid and can be used
+      return res.json({
+        success: true,
+        order: {
+          id: orderDetails.id,
+          amount: orderDetails.amount, // Already in paise
+          currency: orderDetails.currency,
+          receipt: orderDetails.receipt,
+          status: orderDetails.status,
+        },
+        appointmentId: appointment.id,
+        shouldCreateNew: false,
+      });
     } catch (razorpayError: any) {
       console.error(
         "[PAYMENT] Failed to fetch order from Razorpay:",
-        razorpayError
+        razorpayError.error?.description || razorpayError.message
       );
-      // If order doesn't exist in Razorpay, return error
+
+      // If order doesn't exist in Razorpay (might have been deleted/expired)
+      // Clear it from appointment and allow creating new order
+      console.log(
+        "[PAYMENT] Order not found in Razorpay - clearing from appointment"
+      );
+      await prisma.appointment.update({
+        where: { id: appointment.id },
+        data: {
+          paymentId: null, // Clear invalid order
+          paymentStatus: "PENDING",
+        } as any,
+      });
+
       return res.status(404).json({
         success: false,
-        error: "Payment order not found in payment gateway",
+        error:
+          "Previous payment order not found. A new order will be created for you.",
+        shouldCreateNew: true, // Signal frontend to create new order
       });
     }
-
-    return res.json({
-      success: true,
-      order: {
-        id: orderDetails.id,
-        amount: orderDetails.amount, // Already in paise
-        currency: orderDetails.currency,
-        receipt: orderDetails.receipt,
-        status: orderDetails.status,
-      },
-      appointmentId: appointment.id,
-    });
   } catch (err: any) {
     console.error("[PAYMENT] Get existing order error:", {
       message: err.message,
@@ -1075,15 +1365,17 @@ async function sendWhatsAppNotifications(
     console.log("==========================================");
 
     // Get appointment slot time (use slot.startAt or appointment.startAt)
-    const slotTime = appointment.slot?.startAt || appointment.startAt;
-    if (!slotTime) {
+    const slotStartTime = appointment.slot?.startAt || appointment.startAt;
+    const slotEndTime = appointment.slot?.endAt || appointment.endAt;
+    if (!slotStartTime) {
       console.error(
         "[BOOKING CONFIRMATION] ❌ Slot time not found, cannot send notifications"
       );
       return;
     }
 
-    const slotTimeDate = new Date(slotTime);
+    const slotTimeDate = new Date(slotStartTime);
+    const slotEndTimeDate = slotEndTime ? new Date(slotEndTime) : undefined;
     const now = new Date();
 
     // Calculate reminder time (1 hour before slot time)
@@ -1146,7 +1438,9 @@ async function sendWhatsAppNotifications(
 
         const result = await sendLastMinuteConfirmationMessage(
           patientPhone,
-          slotTimeDate
+          slotTimeDate,
+          patientName,
+          slotEndTimeDate
         );
 
         if (result.success) {
@@ -1200,7 +1494,9 @@ async function sendWhatsAppNotifications(
 
         const result = await sendBookingConfirmationMessage(
           patientPhone,
-          slotTimeDate
+          slotTimeDate,
+          patientName,
+          slotEndTimeDate
         );
 
         if (result.success) {
@@ -1232,79 +1528,54 @@ async function sendWhatsAppNotifications(
       }
     }
 
-    // Get doctor phone number
-    const doctorPhone = appointment.doctor?.phone;
-    const doctorName = appointment.doctor?.name || "Doctor";
+    // Send admin notification using doctor_confirmation template (fixed admin phone: 916260440241)
+    console.log("[WHATSAPP CONFIRMATION] Sending admin notification...");
+    console.log("  Admin Phone: 916260440241 (fixed)");
+    console.log("  Template: doctor_confirmation");
 
-    if (!doctorPhone) {
-      console.log(
-        "[WHATSAPP CONFIRMATION] Doctor phone not found in appointment, trying admin fallback..."
+    try {
+      // Prepare data for doctor notification
+      const planName = appointment.planName || "Consultation Plan";
+      const patientName = appointment.patient?.name || "Patient";
+      const slotStartTime = appointment.slot?.startAt || appointment.startAt;
+      const slotEndTime = appointment.slot?.endAt || appointment.endAt;
+
+      // Format appointment date and slot time
+      const appointmentDate = formatDateForTemplate(slotStartTime);
+      const slotTimeFormatted = formatTimeForTemplate(
+        slotStartTime,
+        slotEndTime
       );
-      // Fallback: get admin phone from getSingleAdmin
-      try {
-        const admin = await getSingleAdmin();
-        const adminPhone = admin.phone;
-        const adminName = admin.name || "Admin";
 
-        if (adminPhone) {
-          console.log(
-            "[WHATSAPP CONFIRMATION] Sending doctor notification (using admin phone)..."
-          );
-          console.log("  Admin Name:", adminName);
-          console.log("  Admin Phone:", adminPhone);
-
-          const doctorResult = await sendDoctorNotificationMessage(adminPhone);
-          if (doctorResult.success) {
-            console.log("==========================================");
-            console.log(
-              "[WHATSAPP CONFIRMATION] ✅ Doctor notification sent successfully"
-            );
-            console.log("  Admin Phone:", adminPhone);
-            console.log("  Admin Name:", adminName);
-            console.log("  Template: testing_nut");
-            console.log("==========================================");
-          } else {
-            console.error("==========================================");
-            console.error(
-              "[WHATSAPP CONFIRMATION] ❌ Doctor notification failed"
-            );
-            console.error("  Admin Phone:", adminPhone);
-            console.error("  Error:", doctorResult.error);
-            console.error("==========================================");
-          }
-        } else {
-          console.warn(
-            "[WHATSAPP CONFIRMATION] ⚠️ Admin phone not found, skipping doctor notification"
-          );
-        }
-      } catch (adminError: any) {
-        console.error("==========================================");
-        console.error("[WHATSAPP CONFIRMATION] ❌ Failed to get admin phone");
-        console.error("  Error:", adminError.message);
-        console.error("==========================================");
-      }
-    } else {
-      console.log("[WHATSAPP CONFIRMATION] Sending doctor notification...");
-      console.log("  Doctor Name:", doctorName);
-      console.log("  Doctor Phone:", doctorPhone);
-
-      const doctorResult = await sendDoctorNotificationMessage(doctorPhone);
-      if (doctorResult.success) {
+      const adminResult = await sendDoctorNotificationMessage(
+        planName,
+        patientName,
+        appointmentDate,
+        slotTimeFormatted
+      );
+      if (adminResult.success) {
         console.log("==========================================");
         console.log(
-          "[WHATSAPP CONFIRMATION] ✅ Doctor notification sent successfully"
+          "[WHATSAPP CONFIRMATION] ✅ Admin notification sent successfully"
         );
-        console.log("  Doctor Phone:", doctorPhone);
-        console.log("  Doctor Name:", doctorName);
-        console.log("  Template: testing_nut");
+        console.log("  Admin Phone: 916260440241");
+        console.log("  Template: doctor_confirmation");
         console.log("==========================================");
       } else {
         console.error("==========================================");
-        console.error("[WHATSAPP CONFIRMATION] ❌ Doctor notification failed");
-        console.error("  Doctor Phone:", doctorPhone);
-        console.error("  Error:", doctorResult.error);
+        console.error("[WHATSAPP CONFIRMATION] ❌ Admin notification failed");
+        console.error("  Admin Phone: 916260440241");
+        console.error("  Error:", adminResult.error);
         console.error("==========================================");
       }
+    } catch (error: any) {
+      console.error("==========================================");
+      console.error(
+        "[WHATSAPP CONFIRMATION] ❌ Error sending admin notification"
+      );
+      console.error("  Error:", error.message);
+      console.error("  Stack:", error.stack);
+      console.error("==========================================");
     }
 
     console.log("[WHATSAPP CONFIRMATION] ✅ Notification process completed");
@@ -1479,7 +1750,9 @@ export async function razorpayWebhookHandler(req: Request, res: Response) {
             }
 
             // Find appointment by payment order ID
-            let appointment = await tx.appointment.findFirst({
+            let appointment: Awaited<
+              ReturnType<typeof tx.appointment.findFirst>
+            > = await tx.appointment.findFirst({
               where: {
                 paymentId: orderId,
                 isArchived: false, // Only check non-archived appointments
@@ -1517,9 +1790,9 @@ export async function razorpayWebhookHandler(req: Request, res: Response) {
                   razorpayOrder.notes?.appointmentId;
 
                 if (appointmentIdFromNotes) {
-                  appointment = await tx.appointment.findFirst({
+                  const foundAppointment = await tx.appointment.findFirst({
                     where: {
-                      id: appointmentIdFromNotes,
+                      id: String(appointmentIdFromNotes),
                       isArchived: false,
                     },
                     include: {
@@ -1543,7 +1816,11 @@ export async function razorpayWebhookHandler(req: Request, res: Response) {
                     },
                   });
 
-                  if (appointment && appointment.status === "PENDING") {
+                  if (
+                    foundAppointment &&
+                    foundAppointment.status === "PENDING"
+                  ) {
+                    appointment = foundAppointment;
                     // Link the paymentId to this appointment if it's not already set
                     if (!appointment.paymentId) {
                       await tx.appointment.update({
@@ -1618,51 +1895,25 @@ export async function razorpayWebhookHandler(req: Request, res: Response) {
               } as any,
             });
 
-            // CRITICAL: Archive any other PENDING appointments for the same slot/user/patient
+            // CRITICAL: Archive any other PENDING appointments for the same logical booking
             // This prevents duplicate PENDING appointments from remaining after confirmation
-            // Fetch appointment details for cleanup
+            // Matches by: userId, patientId, startAt (slotTime), planSlug
             const confirmedAppt = await tx.appointment.findUnique({
               where: { id: appointment.id },
-              select: { userId: true, patientId: true, slotId: true },
+              select: {
+                userId: true,
+                patientId: true,
+                startAt: true,
+                planSlug: true,
+              },
             });
 
-            if (confirmedAppt && confirmedAppt.slotId) {
-              const duplicatePendingAppointments =
-                await tx.appointment.findMany({
-                  where: {
-                    slotId: confirmedAppt.slotId,
-                    userId: confirmedAppt.userId,
-                    patientId: confirmedAppt.patientId,
-                    status: "PENDING",
-                    id: { not: appointment.id }, // Exclude the one we just confirmed
-                    isArchived: false,
-                  },
-                });
-
-              if (duplicatePendingAppointments.length > 0) {
-                console.log(
-                  `[WEBHOOK] 🧹 Archiving ${duplicatePendingAppointments.length} duplicate PENDING appointment(s) for the same slot/user/patient`
-                );
-
-                await tx.appointment.updateMany({
-                  where: {
-                    id: {
-                      in: duplicatePendingAppointments.map(
-                        (apt: any) => apt.id
-                      ),
-                    },
-                  },
-                  data: {
-                    isArchived: true,
-                    archivedAt: new Date(),
-                  },
-                });
-
-                console.log(
-                  `[WEBHOOK] ✅ Archived duplicate appointments:`,
-                  duplicatePendingAppointments.map((apt: any) => apt.id)
-                );
-              }
+            if (confirmedAppt) {
+              await archiveDuplicatePendingAppointments(
+                tx,
+                appointment.id,
+                confirmedAppt
+              );
             }
 
             console.log("[WEBHOOK] ✅ Appointment confirmed:", appointment.id);
@@ -1709,6 +1960,33 @@ export async function razorpayWebhookHandler(req: Request, res: Response) {
                 console.error(
                   "[WEBHOOK] ❌ WhatsApp notification failed (non-blocking):",
                   whatsappError.message
+                );
+              }
+
+              // Generate invoice after payment confirmation (non-blocking)
+              try {
+                console.log(
+                  "[WEBHOOK] Generating invoice for appointment:",
+                  appointment.id
+                );
+                const invoiceResult = await generateInvoiceForAppointment(
+                  appointment.id
+                );
+                if (invoiceResult.success) {
+                  console.log(
+                    "[WEBHOOK] ✅ Invoice generated successfully:",
+                    invoiceResult.invoice?.invoiceNumber
+                  );
+                } else {
+                  console.error(
+                    "[WEBHOOK] ❌ Invoice generation failed (non-blocking):",
+                    invoiceResult.error
+                  );
+                }
+              } catch (invoiceError: any) {
+                console.error(
+                  "[WEBHOOK] ❌ Invoice generation failed (non-blocking):",
+                  invoiceError.message
                 );
               }
             });

@@ -60,7 +60,7 @@ export async function createAppointmentHandler(req: Request, res: Response) {
     // SECURITY: Verify patient exists and belongs to the user
     // Use transaction to prevent race condition where patient is deleted between check and appointment creation
     console.log(" [BACKEND] Verifying patient exists...");
-    
+
     // Verify patient within the appointment creation transaction to prevent race conditions
     // This ensures patient exists at the moment of appointment creation
     let patient;
@@ -159,61 +159,64 @@ export async function createAppointmentHandler(req: Request, res: Response) {
 
     if (slotId) {
       console.log(" [BACKEND] Validating slot:", slotId);
-      
+
       // Use transaction with SELECT FOR UPDATE to prevent race conditions
       // This locks the slot row until transaction completes
-      const slotResult = await prisma.$transaction(async (tx) => {
-        // Lock slot row to prevent concurrent bookings
-        const lockedSlot = await tx.$queryRaw<
-          Array<{
-            id: string;
-            startAt: Date;
-            endAt: Date;
-            mode: string;
-            isBooked: boolean;
-            adminId: string;
-          }>
-        >`
+      const slotResult = await prisma.$transaction(
+        async (tx) => {
+          // Lock slot row to prevent concurrent bookings
+          const lockedSlot = await tx.$queryRaw<
+            Array<{
+              id: string;
+              startAt: Date;
+              endAt: Date;
+              mode: string;
+              isBooked: boolean;
+              adminId: string;
+            }>
+          >`
           SELECT id, "startAt", "endAt", mode, "isBooked", "adminId"
           FROM "Slot"
           WHERE id = ${slotId}
           FOR UPDATE
         `;
 
-        if (!lockedSlot || lockedSlot.length === 0) {
-          return null;
+          if (!lockedSlot || lockedSlot.length === 0) {
+            return null;
+          }
+
+          const slot = lockedSlot[0];
+
+          // Check if already booked (double-check after lock)
+          if (slot.isBooked) {
+            return { error: "Slot already booked" };
+          }
+
+          // SECURITY: Validate slot startAt is in the future
+          const now = new Date();
+          const minFutureTime = new Date(now.getTime() + 60 * 1000); // At least 1 minute in the future
+          if (slot.startAt < minFutureTime) {
+            return { error: "Slot start time must be in the future" };
+          }
+
+          // Validate slot endAt is after startAt
+          if (slot.endAt <= slot.startAt) {
+            return { error: "Invalid slot: endAt must be after startAt" };
+          }
+
+          // Mark slot as booked atomically within transaction
+          await tx.slot.update({
+            where: { id: slotId },
+            data: { isBooked: true },
+          });
+
+          return { slot };
+        },
+        {
+          timeout: 10000, // 10 second timeout
+          isolationLevel: "ReadCommitted",
         }
-
-        const slot = lockedSlot[0];
-
-        // Check if already booked (double-check after lock)
-        if (slot.isBooked) {
-          return { error: "Slot already booked" };
-        }
-
-        // SECURITY: Validate slot startAt is in the future
-        const now = new Date();
-        const minFutureTime = new Date(now.getTime() + 60 * 1000); // At least 1 minute in the future
-        if (slot.startAt < minFutureTime) {
-          return { error: "Slot start time must be in the future" };
-        }
-
-        // Validate slot endAt is after startAt
-        if (slot.endAt <= slot.startAt) {
-          return { error: "Invalid slot: endAt must be after startAt" };
-        }
-
-        // Mark slot as booked atomically within transaction
-        await tx.slot.update({
-          where: { id: slotId },
-          data: { isBooked: true },
-        });
-
-        return { slot };
-      }, {
-        timeout: 10000, // 10 second timeout
-        isolationLevel: "ReadCommitted",
-      });
+      );
 
       if (!slotResult) {
         console.error(" [BACKEND] Slot not found:", slotId);
@@ -310,7 +313,8 @@ export async function createAppointmentHandler(req: Request, res: Response) {
           console.error(" [BACKEND] startAt must be in the future");
           return res.status(400).json({
             success: false,
-            message: "Appointment start time must be in the future (at least 1 minute from now)",
+            message:
+              "Appointment start time must be in the future (at least 1 minute from now)",
           });
         }
 
@@ -327,7 +331,9 @@ export async function createAppointmentHandler(req: Request, res: Response) {
         // SECURITY: Require either slotId OR valid startAt/endAt dates
         // Placeholder appointments with arbitrary dates are not allowed
         if (startAt && endAt) {
-          console.log(" [BACKEND] Using provided startAt/endAt dates (no slotId)");
+          console.log(
+            " [BACKEND] Using provided startAt/endAt dates (no slotId)"
+          );
           appointmentStartAt = new Date(startAt);
           appointmentEndAt = new Date(endAt);
 
@@ -350,7 +356,8 @@ export async function createAppointmentHandler(req: Request, res: Response) {
             console.error(" [BACKEND] startAt must be in the future");
             return res.status(400).json({
               success: false,
-              message: "Appointment start time must be in the future (at least 1 minute from now)",
+              message:
+                "Appointment start time must be in the future (at least 1 minute from now)",
             });
           }
 
@@ -372,12 +379,12 @@ export async function createAppointmentHandler(req: Request, res: Response) {
           console.warn(
             " [BACKEND] This appointment MUST have a slot assigned before confirmation"
           );
-          
+
           // Create placeholder dates (will be updated when slot is selected)
           // These are clearly placeholders and will be validated when slot is assigned
           appointmentStartAt = new Date();
           appointmentEndAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour later
-          
+
           console.log(
             " [BACKEND] Using placeholder dates (will be updated when slot is selected):",
             {
@@ -433,77 +440,96 @@ export async function createAppointmentHandler(req: Request, res: Response) {
         );
         return res.status(404).json({
           success: false,
-          message: "Patient not found or unauthorized. Please refresh and try again.",
+          message:
+            "Patient not found or unauthorized. Please refresh and try again.",
         });
       }
 
-      // CRITICAL: Check if a PENDING appointment already exists for this user/patient/slot combination
+      // CRITICAL: Check if a PENDING appointment already exists for this logical booking
       // This prevents duplicate PENDING appointments when the booking flow is called multiple times
-      // Only check if slotId is provided (for appointments with slots)
-      if (finalSlotId) {
-        const existingPendingAppointment = await prisma.appointment.findFirst({
-          where: {
+      // Matches by: userId, patientId, startAt (slotTime), planSlug
+      // This works whether or not slotId is provided
+      const existingPendingAppointment = await prisma.appointment.findFirst({
+        where: {
+          userId,
+          patientId,
+          startAt: appointmentStartAt, // Match by slot time
+          planSlug,
+          status: "PENDING",
+          isArchived: false, // Only check non-archived appointments
+        },
+        orderBy: {
+          createdAt: "desc", // Get the most recent one
+        },
+      });
+
+      if (existingPendingAppointment) {
+        console.log(
+          " [BACKEND] ⚠️ PENDING appointment already exists for this booking (userId, patientId, startAt, planSlug). Updating existing appointment:",
+          existingPendingAppointment.id,
+          {
             userId,
             patientId,
-            slotId: finalSlotId,
-            status: "PENDING",
-            isArchived: false, // Only check non-archived appointments
-          },
-          orderBy: {
-            createdAt: "desc", // Get the most recent one
+            startAt: appointmentStartAt,
+            planSlug,
+          }
+        );
+
+        // Determine booking progress based on what's provided
+        let progress: BookingProgress | null = null;
+        if (
+          bookingProgress &&
+          ["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(
+            bookingProgress
+          )
+        ) {
+          progress = bookingProgress as BookingProgress;
+        } else {
+          // Auto-detect progress based on provided data
+          if (slotId) {
+            progress = "SLOT"; // Slot selected, next is payment
+          } else if (patientId) {
+            progress = "USER_DETAILS"; // User form filled, next is recall
+          }
+        }
+
+        // Update the existing PENDING appointment instead of creating a new one
+        appointment = await prisma.appointment.update({
+          where: { id: existingPendingAppointment.id },
+          data: {
+            bookingProgress: progress,
+            startAt: appointmentStartAt,
+            endAt: appointmentEndAt,
+            slotId: finalSlotId, // Update slotId if provided
+            mode: appointmentMode as AppointmentMode,
+            planSlug,
+            planName,
+            planPrice: Number(planPrice),
+            planDuration,
+            planPackageName,
           },
         });
 
-        if (existingPendingAppointment) {
-          console.log(
-            " [BACKEND] ⚠️ PENDING appointment already exists for this slot/patient. Updating existing appointment:",
-            existingPendingAppointment.id
-          );
+        console.log(
+          " [BACKEND] Updated existing PENDING appointment:",
+          appointment.id
+        );
 
-          // Determine booking progress based on what's provided
-          let progress: BookingProgress | null = null;
-          if (bookingProgress && ["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)) {
-            progress = bookingProgress as BookingProgress;
-          } else {
-            // Auto-detect progress based on provided data
-            if (slotId) {
-              progress = "SLOT"; // Slot selected, next is payment
-            } else if (patientId) {
-              progress = "USER_DETAILS"; // User form filled, next is recall
-            }
-          }
-
-          // Update the existing PENDING appointment instead of creating a new one
-          appointment = await prisma.appointment.update({
-            where: { id: existingPendingAppointment.id },
-            data: {
-              bookingProgress: progress,
-              startAt: appointmentStartAt,
-              endAt: appointmentEndAt,
-              mode: appointmentMode as AppointmentMode,
-              planSlug,
-              planName,
-              planPrice: Number(planPrice),
-              planDuration,
-              planPackageName,
-            },
-          });
-
-          console.log(" [BACKEND] Updated existing PENDING appointment:", appointment.id);
-          
-          // Return early - don't create a new appointment
-          return res.status(200).json({
-            success: true,
-            message: "Appointment updated successfully",
-            data: appointment,
-            updated: true, // Indicate this was an update, not a create
-          });
-        }
+        // Return early - don't create a new appointment
+        return res.status(200).json({
+          success: true,
+          message: "Appointment updated successfully",
+          data: appointment,
+          updated: true, // Indicate this was an update, not a create
+        });
       }
 
       // Determine booking progress based on what's provided
       let progress: BookingProgress | null = null;
-      if (bookingProgress && ["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)) {
+      if (
+        bookingProgress &&
+        ["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)
+      ) {
         progress = bookingProgress as BookingProgress;
       } else {
         // Auto-detect progress based on provided data
@@ -741,12 +767,21 @@ export async function getPendingAppointments(req: Request, res: Response) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
+    const { patientId } = req.query; // Optional patientId filter
+
+    const where: any = {
+      userId: req.user.id,
+      status: "PENDING",
+      isArchived: false, // Exclude deleted appointments
+    };
+
+    // If patientId is provided, filter by patientId
+    if (patientId && typeof patientId === "string") {
+      where.patientId = patientId;
+    }
+
     const appointments = await prisma.appointment.findMany({
-      where: {
-        userId: req.user.id,
-        status: "PENDING",
-        isArchived: false, // Exclude deleted appointments
-      },
+      where,
       orderBy: { createdAt: "desc" },
       include: {
         patient: {
@@ -771,10 +806,14 @@ export async function getPendingAppointments(req: Request, res: Response) {
     console.log(
       `[PENDING APPOINTMENTS] Returning ${appointments.length} pending appointments for user ${req.user.id}`
     );
-    
+
     // Log each appointment's booking progress for debugging
     appointments.forEach((apt: any) => {
-      console.log(`[PENDING APPOINTMENTS] Appointment ${apt.id}: bookingProgress = ${apt.bookingProgress || 'null'}, slotId = ${apt.slotId || 'null'}`);
+      console.log(
+        `[PENDING APPOINTMENTS] Appointment ${apt.id}: bookingProgress = ${
+          apt.bookingProgress || "null"
+        }, slotId = ${apt.slotId || "null"}`
+      );
     });
 
     return res.json({ success: true, appointments });
@@ -797,10 +836,14 @@ export async function updateBookingProgress(req: Request, res: Response) {
     const { appointmentId } = req.params;
     const { bookingProgress } = req.body;
 
-    if (!bookingProgress || !["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)) {
+    if (
+      !bookingProgress ||
+      !["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Invalid bookingProgress. Must be one of: USER_DETAILS, RECALL, SLOT, PAYMENT",
+        message:
+          "Invalid bookingProgress. Must be one of: USER_DETAILS, RECALL, SLOT, PAYMENT",
       });
     }
 
@@ -911,16 +954,23 @@ export async function getAppointmentsByPatient(req: Request, res: Response) {
     let patient;
     try {
       patient = await prisma.patientDetials.findFirst({
-        where: { 
-          id: patientId, 
+        where: {
+          id: patientId,
           userId: req.user.id,
           isArchived: false, // Exclude archived patients
         },
       });
     } catch (dbError: any) {
-      console.error("[GET APPOINTMENTS BY PATIENT] Database connection error on patient lookup:", dbError);
+      console.error(
+        "[GET APPOINTMENTS BY PATIENT] Database connection error on patient lookup:",
+        dbError
+      );
       // Handle connection errors (P1017 - Server has closed the connection)
-      if (dbError.code === "P1017" || dbError.message?.includes("closed") || dbError.message?.includes("ConnectionReset")) {
+      if (
+        dbError.code === "P1017" ||
+        dbError.message?.includes("closed") ||
+        dbError.message?.includes("ConnectionReset")
+      ) {
         return res.status(503).json({
           success: false,
           message: "Database connection error. Please try again in a moment.",
@@ -966,9 +1016,16 @@ export async function getAppointmentsByPatient(req: Request, res: Response) {
         },
       });
     } catch (dbError: any) {
-      console.error("[GET APPOINTMENTS BY PATIENT] Database connection error on appointments lookup:", dbError);
+      console.error(
+        "[GET APPOINTMENTS BY PATIENT] Database connection error on appointments lookup:",
+        dbError
+      );
       // Handle connection errors (P1017 - Server has closed the connection)
-      if (dbError.code === "P1017" || dbError.message?.includes("closed") || dbError.message?.includes("ConnectionReset")) {
+      if (
+        dbError.code === "P1017" ||
+        dbError.message?.includes("closed") ||
+        dbError.message?.includes("ConnectionReset")
+      ) {
         return res.status(503).json({
           success: false,
           message: "Database connection error. Please try again in a moment.",
@@ -986,16 +1043,20 @@ export async function getAppointmentsByPatient(req: Request, res: Response) {
       code: err?.code,
       stack: err?.stack,
     });
-    
+
     // Check if it's a connection error that wasn't caught in inner try-catch
-    if (err.code === "P1017" || err.message?.includes("closed") || err.message?.includes("ConnectionReset")) {
+    if (
+      err.code === "P1017" ||
+      err.message?.includes("closed") ||
+      err.message?.includes("ConnectionReset")
+    ) {
       return res.status(503).json({
         success: false,
         message: "Database connection error. Please try again in a moment.",
         retryable: true,
       });
     }
-    
+
     return res.status(500).json({
       success: false,
       message: "Failed to fetch appointments",
@@ -1065,7 +1126,10 @@ export async function updateAppointmentSlotHandler(
         where: { id: slotId },
       });
     } catch (dbError: any) {
-      console.error("[UPDATE SLOT] Database connection error on slot lookup:", dbError);
+      console.error(
+        "[UPDATE SLOT] Database connection error on slot lookup:",
+        dbError
+      );
       if (dbError.code === "P1017" || dbError.message?.includes("closed")) {
         return res.status(503).json({
           success: false,
@@ -1118,11 +1182,15 @@ export async function updateAppointmentSlotHandler(
             `[BACKEND] Unbooked slot ${appointment.slotId} for PENDING appointment ${appointmentId}`
           );
         } catch (dbError: any) {
-          console.error("[UPDATE SLOT] Database connection error on slot unbooking:", dbError);
+          console.error(
+            "[UPDATE SLOT] Database connection error on slot unbooking:",
+            dbError
+          );
           if (dbError.code === "P1017" || dbError.message?.includes("closed")) {
             return res.status(503).json({
               success: false,
-              message: "Database connection error. Please try again in a moment.",
+              message:
+                "Database connection error. Please try again in a moment.",
               retryable: true,
             });
           }
@@ -1148,7 +1216,10 @@ export async function updateAppointmentSlotHandler(
     };
 
     // If bookingProgress is provided and valid, update it
-    if (bookingProgress && ["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)) {
+    if (
+      bookingProgress &&
+      ["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(bookingProgress)
+    ) {
       updateData.bookingProgress = bookingProgress as BookingProgress;
     } else {
       // Auto-set to SLOT if not provided (slot selected means user is at SLOT step)
@@ -1162,7 +1233,10 @@ export async function updateAppointmentSlotHandler(
         data: updateData,
       });
     } catch (dbError: any) {
-      console.error("[UPDATE SLOT] Database connection error on appointment update:", dbError);
+      console.error(
+        "[UPDATE SLOT] Database connection error on appointment update:",
+        dbError
+      );
       if (dbError.code === "P1017" || dbError.message?.includes("closed")) {
         return res.status(503).json({
           success: false,
@@ -1192,16 +1266,20 @@ export async function updateAppointmentSlotHandler(
     });
   } catch (err: any) {
     console.error("UPDATE APPOINTMENT SLOT ERROR:", err);
-    
+
     // Handle Prisma connection errors specifically
-    if (err.code === "P1017" || err.message?.includes("closed") || err.message?.includes("connection")) {
+    if (
+      err.code === "P1017" ||
+      err.message?.includes("closed") ||
+      err.message?.includes("connection")
+    ) {
       return res.status(503).json({
         success: false,
         message: "Database connection error. Please try again in a moment.",
         retryable: true,
       });
     }
-    
+
     return res.status(500).json({
       success: false,
       message: err.message || "Internal server error",
@@ -1248,7 +1326,8 @@ export async function deleteAppointmentHandler(req: Request, res: Response) {
     if (appointment.userId !== userId) {
       return res.status(403).json({
         success: false,
-        error: "Unauthorized: You don't have permission to delete this appointment",
+        error:
+          "Unauthorized: You don't have permission to delete this appointment",
       });
     }
 
@@ -1269,7 +1348,9 @@ export async function deleteAppointmentHandler(req: Request, res: Response) {
       },
     });
 
-    console.log(`[USER] Appointment ${appointmentId} deleted by user ${userId}`);
+    console.log(
+      `[USER] Appointment ${appointmentId} deleted by user ${userId}`
+    );
 
     return res.json({
       success: true,

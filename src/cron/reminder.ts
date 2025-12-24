@@ -1,9 +1,10 @@
 import cron from "node-cron";
 import prisma from "../database/prismaclient";
-import { getSingleAdmin } from "../modules/slots/slots.services";
 import {
   sendReminderMessage,
   sendDoctorNotificationMessage,
+  formatDateForTemplate,
+  formatTimeForTemplate,
 } from "../services/whatsapp.service";
 
 /**
@@ -115,28 +116,12 @@ async function checkAndSendReminders() {
     );
     console.log("==========================================");
 
-    // Get admin/doctor phone for fallback
-    let adminPhone: string | null = null;
-    try {
-      const admin = await getSingleAdmin();
-      adminPhone = admin.phone;
-      console.log(
-        "[CRON REMINDER] Admin phone fetched for fallback:",
-        adminPhone
-      );
-    } catch (error: any) {
-      console.warn("==========================================");
-      console.warn(
-        "[CRON REMINDER] ⚠️ Could not fetch admin phone for reminders"
-      );
-      console.warn("  Error:", error.message);
-      console.warn("==========================================");
-    }
+    // Admin phone is fixed: 916260440241 (handled in sendDoctorNotificationMessage)
 
     // Process each appointment
     for (const appointment of upcomingAppointments) {
       try {
-        await sendReminderForAppointment(appointment, adminPhone);
+        await sendReminderForAppointment(appointment);
       } catch (error: any) {
         console.error("==========================================");
         console.error(
@@ -166,14 +151,10 @@ async function checkAndSendReminders() {
 /**
  * Send reminder for a single appointment
  */
-async function sendReminderForAppointment(
-  appointment: any,
-  adminPhone: string | null
-) {
+async function sendReminderForAppointment(appointment: any) {
   const appointmentId = appointment.id;
   const patientName = appointment.patient?.name || "Patient";
   const patientPhone = appointment.patient?.phone;
-  const doctorPhone = appointment.doctor?.phone || adminPhone;
   const appointmentStartAt = appointment.slot?.startAt || appointment.startAt;
   const appointmentMode = appointment.slot?.mode || appointment.mode;
 
@@ -186,12 +167,13 @@ async function sendReminderForAppointment(
   console.log("  Appointment Mode:", appointmentMode);
   console.log("  Patient Name:", patientName);
   console.log("  Patient Phone:", patientPhone || "Not found");
-  console.log("  Doctor Phone:", doctorPhone || "Not found");
+  console.log("  Admin Phone: 916260440241 (fixed)");
   console.log("==========================================");
 
   // Get slot time for reminder message
-  const slotTime = appointment.slot?.startAt || appointment.startAt;
-  if (!slotTime) {
+  const slotStartTime = appointment.slot?.startAt || appointment.startAt;
+  const slotEndTime = appointment.slot?.endAt || appointment.endAt;
+  if (!slotStartTime) {
     console.warn("==========================================");
     console.warn(`[CRON REMINDER] ⚠️ Slot time not found`);
     console.warn("  Appointment ID:", appointmentId);
@@ -207,7 +189,12 @@ async function sendReminderForAppointment(
     return;
   }
 
-  const slotTimeDate = new Date(slotTime);
+  const slotStartTimeDate = new Date(slotStartTime);
+  const slotEndTimeDate = slotEndTime ? new Date(slotEndTime) : undefined;
+
+  // Note: The query already filters by reminderSent: false, so appointments
+  // with reminderSent: true (last-minute bookings) won't be fetched.
+  // This ensures reminders are only sent for non-last-minute bookings.
 
   // Send patient reminder
   let reminderSentSuccessfully = false;
@@ -218,7 +205,9 @@ async function sendReminderForAppointment(
       // Send reminder message using the reminder template
       const patientResult = await sendReminderMessage(
         patientPhone,
-        slotTimeDate
+        slotStartTimeDate,
+        patientName,
+        slotEndTimeDate
       );
 
       if (patientResult.success) {
@@ -227,7 +216,10 @@ async function sendReminderForAppointment(
         console.log("  Appointment ID:", appointmentId);
         console.log("  Patient Phone:", patientPhone);
         console.log("  Patient Name:", patientName);
-        console.log("  Slot Time:", slotTimeDate.toISOString());
+        console.log("  Slot Start Time:", slotStartTimeDate.toISOString());
+        if (slotEndTimeDate) {
+          console.log("  Slot End Time:", slotEndTimeDate.toISOString());
+        }
         console.log("  Template: Reminder (1 hour before)");
         console.log("==========================================");
         reminderSentSuccessfully = true;
@@ -260,41 +252,48 @@ async function sendReminderForAppointment(
     reminderSentSuccessfully = true; // Treat as "sent" to prevent infinite retries
   }
 
-  // Send doctor reminder (non-blocking - doesn't affect patient reminder status)
-  if (doctorPhone) {
-    try {
-      console.log("[CRON REMINDER] Sending doctor reminder...");
-      const doctorResult = await sendDoctorNotificationMessage(doctorPhone);
+  // Send admin reminder using doctor_confirmation template (fixed admin phone: 916260440241)
+  // Non-blocking - doesn't affect patient reminder status
+  try {
+    console.log("[CRON REMINDER] Sending admin reminder...");
+    console.log("  Admin Phone: 916260440241 (fixed)");
+    console.log("  Template: doctor_confirmation");
 
-      if (doctorResult.success) {
-        console.log("==========================================");
-        console.log(`[CRON REMINDER] ✅ Doctor reminder sent successfully`);
-        console.log("  Appointment ID:", appointmentId);
-        console.log("  Doctor Phone:", doctorPhone);
-        console.log("  Template: testing_nut");
-        console.log("==========================================");
-      } else {
-        console.error("==========================================");
-        console.error(`[CRON REMINDER] ❌ Doctor reminder failed`);
-        console.error("  Appointment ID:", appointmentId);
-        console.error("  Doctor Phone:", doctorPhone);
-        console.error("  Error:", doctorResult.error);
-        console.error("==========================================");
-      }
-    } catch (error: any) {
+    // Prepare data for doctor notification
+    const planName = appointment.planName || "Consultation Plan";
+    const appointmentDate = formatDateForTemplate(slotStartTime);
+    const slotTimeFormatted = formatTimeForTemplate(slotStartTime, slotEndTime);
+
+    const adminResult = await sendDoctorNotificationMessage(
+      planName,
+      patientName,
+      appointmentDate,
+      slotTimeFormatted
+    );
+
+    if (adminResult.success) {
+      console.log("==========================================");
+      console.log(`[CRON REMINDER] ✅ Admin reminder sent successfully`);
+      console.log("  Appointment ID:", appointmentId);
+      console.log("  Admin Phone: 916260440241");
+      console.log("  Template: doctor_confirmation");
+      console.log("==========================================");
+    } else {
       console.error("==========================================");
-      console.error(`[CRON REMINDER] ❌ Error sending doctor reminder`);
+      console.error(`[CRON REMINDER] ❌ Admin reminder failed`);
       console.error("  Appointment ID:", appointmentId);
-      console.error("  Doctor Phone:", doctorPhone);
-      console.error("  Error:", error.message);
-      console.error("  Stack:", error.stack);
+      console.error("  Admin Phone: 916260440241");
+      console.error("  Error:", adminResult.error);
       console.error("==========================================");
     }
-  } else {
-    console.warn("==========================================");
-    console.warn(`[CRON REMINDER] ⚠️ Doctor phone not found`);
-    console.warn("  Appointment ID:", appointmentId);
-    console.warn("==========================================");
+  } catch (error: any) {
+    console.error("==========================================");
+    console.error(`[CRON REMINDER] ❌ Error sending admin reminder`);
+    console.error("  Appointment ID:", appointmentId);
+    console.error("  Admin Phone: 916260440241");
+    console.error("  Error:", error.message);
+    console.error("  Stack:", error.stack);
+    console.error("==========================================");
   }
 
   // SECURITY: Mark reminder as sent using atomic update to prevent duplicate reminders

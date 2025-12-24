@@ -117,3 +117,17 @@ export const adminLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
+// Auth Endpoints - Moderate rate limiting (login, signup, session-sync)
+// Note: session-sync should be called once per login, but we allow more for retries
+export const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 50, // Increased from 20 to 50 to allow for session-sync retries and multiple tabs
+  message: {
+    success: false,
+    message: "Too many authentication attempts. Please wait a moment.",
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true, // Don't count successful requests - only failures count
+});
