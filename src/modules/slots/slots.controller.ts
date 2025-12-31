@@ -8,6 +8,7 @@ import {
   getAdminSlots,
   getAdminDayOffList,
   previewSlotsForRange,
+  getAdminSlotDateRange,
 } from "./slots.services";
 import {
   generateSlotsSchema,
@@ -77,26 +78,23 @@ export async function removeDayOffHandler(req: Request, res: Response) {
 
 export async function getAvailableSlotsHandler(req: Request, res: Response) {
   try {
-    console.log(" [SLOTS CONTROLLER] Available slots request received");
-    console.log(" [SLOTS CONTROLLER] Query params:", req.query);
+    // console.log(" [SLOTS CONTROLLER] Available slots request received");
+// console.log(" [SLOTS CONTROLLER] Query params:", req.query);
+const parsed = availableSlotsQuerySchema.parse(req.query);
+    // console.log(" [SLOTS CONTROLLER] Validated query:", parsed);
+const slots = await getAvailableSlotsForDate(parsed);
 
-    const parsed = availableSlotsQuerySchema.parse(req.query);
-    console.log(" [SLOTS CONTROLLER] Validated query:", parsed);
-
-    const slots = await getAvailableSlotsForDate(parsed);
-
-    console.log(" [SLOTS CONTROLLER] Returning slots:", {
-      count: slots.length,
-      date: parsed.date,
-      mode: parsed.mode,
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: slots,
-    });
-  } catch (err: any) {
-    console.error(" [SLOTS CONTROLLER] getAvailableSlotsHandler error:", err);
+    // console.log(" [SLOTS CONTROLLER] Returning slots:", {
+    // count: slots.length,
+    // date: parsed.date,
+    // mode: parsed.mode,
+    // });
+    // return res.status(200).json({
+    // success: true,
+    // data: slots,
+    // });
+    // } catch (err: any) {
+    // console.error(" [SLOTS CONTROLLER] getAvailableSlotsHandler error:", err);
     console.error(" [SLOTS CONTROLLER] Error details:", {
       message: err?.message,
       name: err?.name,
@@ -186,6 +184,23 @@ export async function previewSlotsHandler(req: Request, res: Response) {
     return res.status(400).json({
       success: false,
       message: err?.message || "Failed to preview slots",
+    });
+  }
+}
+
+export async function getSlotDateRangeHandler(req: Request, res: Response) {
+  try {
+    const dateRange = await getAdminSlotDateRange();
+
+    return res.status(200).json({
+      success: true,
+      data: dateRange,
+    });
+  } catch (err: any) {
+    console.error("getSlotDateRangeHandler error:", err);
+    return res.status(500).json({
+      success: false,
+      message: err?.message || "Failed to fetch slot date range",
     });
   }
 }

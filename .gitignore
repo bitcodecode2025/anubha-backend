@@ -14,6 +14,9 @@ src/generated/prisma
 logs
 *.log
 
+# invoices (PDFs are uploaded to Cloudinary, local files are temporary)
+invoices/
+
 # misc
 .DS_Store
 Thumbs.db

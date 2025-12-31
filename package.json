@@ -7,8 +7,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
     "build": "tsc",
     "start": "node dist/app.js",
-    "seed": "ts-node prisma/seed.ts",
-    "seed:slots": "ts-node src/scripts/seedSlots.ts"
+    "seed": "ts-node prisma/seed.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
@@ -22,6 +21,7 @@
     "@types/dotenv": "^6.1.1",
     "@types/express": "^5.0.5",
     "@types/node-cron": "^3.0.11",
+    "@types/pdfkit": "^0.17.4",
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
     "cloudinary": "^2.8.0",
@@ -36,8 +36,10 @@
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
+    "pdfkit": "^0.17.2",
     "prisma": "^6.3.1",
     "razorpay": "^2.9.6",
+    "resend": "^6.6.0",
     "typescript": "^5.9.3",
     "zod": "^4.1.12"
   },

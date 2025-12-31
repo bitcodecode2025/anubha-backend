@@ -7,10 +7,526 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model User {
+  id                    String           @id @default(uuid())
+  name                  String
+  role                  Role             @default(USER)
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  email                 String?          @unique
+  phone                 String?          @unique
+  password              String?        
+  resetPasswordToken    String?
+  resetPasswordExpiry   DateTime?
+  archivedAt            DateTime?
+  isArchived            Boolean          @default(false)
+  appointments          Appointment[]
+  patients              PatientDetials[]
+
+  @@index([phone])
+  @@index([email])
+  @@index([isArchived])
+  @@index([resetPasswordToken])
+}
+
+model OTP {
+  id        String   @id @default(uuid())
+  code      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  phone     String?
+  email     String?
+
+  @@index([phone])
+  @@index([email])
+  @@index([expiresAt])
+  @@index([phone, expiresAt])
+  @@index([email, expiresAt])
+}
+
+model Testimonial {
+  id        String   @id @default(uuid())
+  name      String
+  text      String
+  imageUrl  String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+
+model Admin {
+  id                String              @id @default(uuid())
+  name              String
+  phone             String?              @unique
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime          @updatedAt
+  email             String?              @unique
+  password          String             
+  archivedAt        DateTime?
+  isArchived        Boolean             @default(false)
+  appointments      Appointment[]       @relation("DoctorAppointments")
+  doctorDaysOff     DoctorDayOff[]
+  DoctorFormSession DoctorFormSession[]
+  slots             Slot[]
+
+  @@index([email])
+  @@index([phone])
+  @@index([isArchived])
+}
+
+model PatientDetials {
+  id                  String              @id @default(uuid())
+  userId              String
+  name                String
+  age                 Int
+  gender              Gender
+  weight              Float
+  height              Float
+  neck                Float?
+  waist               Float?
+  hip                 Float?
+  wakeUpTime          String
+  sleepTime           String
+  sleepQuality        SleepQuality
+  dailyWaterIntake    Int
+  medicalHistory      String?
+  bowelMovement       BowelMovement
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  address             String
+  appointmentConcerns String?
+  dailyFoodIntake     String?
+  dateOfBirth         DateTime
+  email               String
+  phone               String
+  allergic            String?
+  archivedAt          DateTime?
+  foodPreference      FoodPreference
+  isArchived          Boolean             @default(false)
+  abdomenLower        Float?
+  abdomenUpper        Float?
+  ankle               Float?
+  arms                Float?
+  calf                Float?
+  chest               Float?
+  chestFemale         Float?
+  expandedChestLungs  Float?
+  forearms            Float?
+  normalChestLung     Float?
+  thighLower          Float?
+  thighUpper          Float?
+  wrist               Float?
+  appointments        Appointment[]
+  DoctorFormSession   DoctorFormSession[]
+  files               File[]
+  user                User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recalls             Recall[]            @relation("PatientRecalls")
+
+  @@unique([userId, name])
+  @@index([userId])
+  @@index([phone])
+  @@index([email])
+  @@index([isArchived])
+}
+
+model Recall {
+  id            String         @id @default(uuid())
+  patientId     String
+  appointmentId String?        @unique
+  notes         String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  archivedAt    DateTime?
+  isArchived    Boolean        @default(false)
+  appointment   Appointment?   @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  patient       PatientDetials @relation("PatientRecalls", fields: [patientId], references: [id], onDelete: Cascade)
+  entries       RecallEntry[]
+
+  @@index([patientId])
+  @@index([appointmentId])
+  @@index([isArchived])
+}
+
+model RecallEntry {
+  id        String   @id @default(uuid())
+  recallId  String
+  mealType  MealType
+  time      String
+  foodItem  String
+  quantity  String
+  notes     String?
+  createdAt DateTime @default(now())
+  recall    Recall   @relation(fields: [recallId], references: [id], onDelete: Cascade)
+
+  @@index([recallId, mealType])
+  @@index([mealType])
+}
+
+model File {
+  id          String          @id @default(uuid())
+  url         String
+  fileName    String
+  mimeType    String
+  createdAt   DateTime        @default(now())
+  provider    StorageProvider @default(CLOUDINARY)
+  sizeInBytes Int
+  updatedAt   DateTime        @updatedAt
+  patientId   String?
+  publicId    String
+  archivedAt  DateTime?
+  isArchived  Boolean         @default(false)
+  patient     PatientDetials? @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([isArchived])
+}
+
+model Slot {
+  id           String          @id @default(uuid())
+  isBooked     Boolean         @default(false)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  endAt        DateTime
+  startAt      DateTime
+  mode         AppointmentMode
+  adminId      String
+  archivedAt   DateTime?
+  isArchived   Boolean         @default(false)
+  appointments Appointment[]
+  admin        Admin           @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@unique([adminId, startAt])
+  @@index([adminId, startAt, isBooked])
+  @@index([startAt, isBooked])
+  @@index([isArchived])
+}
+
+model Appointment {
+  id                      String              @id @default(uuid())
+  status                  AppointmentStatus   @default(PENDING)
+  userId                  String
+  doctorId                String
+  paymentId               String?
+  amount                  Int?
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  endAt                   DateTime
+  reminderSent            Boolean             @default(false)
+  slotId                  String?
+  startAt                 DateTime
+  notes                   String?
+  patientId               String
+  planDuration            String
+  planName                String
+  planPackageName         String?
+  planPrice               Int
+  planSlug                String
+  mode                    AppointmentMode
+  shortNoticeReminderSent Boolean             @default(false)
+  paymentStatus           String              @default("PENDING")
+  archivedAt              DateTime?
+  isArchived              Boolean             @default(false)
+  bookingProgress         BookingProgress?
+  reminderTime            DateTime?
+  deletedByAdminAt        DateTime?
+  deletedByAdminReason    String?
+  isDeletedByAdmin        Boolean             @default(false)
+  doctor                  Admin               @relation("DoctorAppointments", fields: [doctorId], references: [id])
+  patient                 PatientDetials      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  slot                    Slot?               @relation(fields: [slotId], references: [id])
+  user                    User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  DoctorFormSession       DoctorFormSession[]
+  invoice                 Invoice?
+  MessageLog              MessageLog[]
+  recall                  Recall?
+  Reminder                Reminder[]
+  doctorNotes             DoctorNotes?
+
+  @@index([startAt])
+  @@index([doctorId, startAt])
+  @@index([patientId, startAt])
+  @@index([status, startAt])
+  @@index([bookingProgress])
+  @@index([status, bookingProgress])
+  @@index([slotId, status])
+  @@index([reminderTime, reminderSent])
+  @@index([isArchived])
+  @@index([paymentId]) // CRITICAL: Index for payment verification queries
+  @@index([userId, paymentId, isArchived]) // Composite index for common payment lookup pattern
+  @@index([isDeletedByAdmin])
+}
+
+model DoctorDayOff {
+  id         String    @id @default(uuid())
+  date       DateTime
+  reason     String?
+  createdAt  DateTime  @default(now())
+  adminId    String
+  archivedAt DateTime?
+  isArchived Boolean   @default(false)
+  admin      Admin     @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@unique([adminId, date])
+  @@index([date])
+  @@index([adminId, date])
+  @@index([isArchived])
+}
+
+model WebhookEvent {
+  id        String   @id @default(uuid())
+  eventId   String   @unique
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model DoctorNotes {
+  id                      String                 @id @default(cuid())
+  appointmentId           String                 @unique
+  formVersion             String                 @default("1.0.0")
+  isDraft                 Boolean                @default(true)
+  isCompleted             Boolean                @default(false)
+  completedAt             DateTime?
+  submittedAt             DateTime?
+  notes                   String?
+  createdAt               DateTime               @default(now())
+  updatedAt               DateTime               @updatedAt
+  createdBy               String?
+  updatedBy               String?
+  isArchived              Boolean                @default(false)
+  archivedAt              DateTime?
+  personalHistory         String?
+  reasonForJoiningProgram String?
+  ethnicity               String?
+  joiningDate             DateTime?
+  expiryDate              DateTime?
+  dietPrescriptionDate    DateTime?
+  durationOfDiet          String?
+  maritalStatus           String?
+  numberOfChildren        Int?
+  dietPreference          String?
+  wakeupTime              String?
+  bedTime                 String?
+  dayNap                  String?
+  workoutTiming           String?
+  workoutType             String?
+  formData                Json?
+  analyticsData           Json?
+  attachments             DoctorNoteAttachment[]
+  foodFrequencyItems      FoodFrequencyItem[]
+  healthConditions        HealthCondition[]
+  mealEntries             MealEntry[]
+  questionnaireAnswers    QuestionnaireAnswer[]
+  appointment             Appointment            @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@index([createdAt])
+  @@index([formVersion])
+  @@index([isCompleted, submittedAt])
+  @@index([isDraft])
+  @@index([isArchived, archivedAt])
+  @@index([createdBy])
+  @@index([submittedAt])
+  @@map("doctor_notes")
+}
+
+model MealEntry {
+  id            String      @id @default(cuid())
+  doctorNotesId String
+  mealPeriod    MealPeriod
+  time          String?
+  foodItems     Json
+  waterIntake   Int?
+  medicines     String?
+  notes         String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  isArchived    Boolean     @default(false)
+  archivedAt    DateTime?
+  doctorNotes   DoctorNotes @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
+
+  @@unique([doctorNotesId, mealPeriod])
+  @@index([doctorNotesId, mealPeriod])
+  @@index([mealPeriod])
+  @@index([doctorNotesId])
+  @@index([isArchived])
+}
+
+model FoodFrequencyItem {
+  id            String      @id @default(cuid())
+  doctorNotesId String
+  category      String
+  itemName      String
+  checked       Boolean     @default(false)
+  quantity      String?
+  frequency     String?
+  metadata      Json?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  isArchived    Boolean     @default(false)
+  archivedAt    DateTime?
+  doctorNotes   DoctorNotes @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
+
+  @@unique([doctorNotesId, category, itemName])
+  @@index([doctorNotesId, category])
+  @@index([category, itemName])
+  @@index([doctorNotesId])
+  @@index([checked, category])
+  @@index([isArchived])
+}
+
+model HealthCondition {
+  id            String      @id @default(cuid())
+  doctorNotesId String
+  conditionName String
+  hasCondition  String
+  notes         String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  isArchived    Boolean     @default(false)
+  archivedAt    DateTime?
+  doctorNotes   DoctorNotes @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
+
+  @@unique([doctorNotesId, conditionName])
+  @@index([doctorNotesId])
+  @@index([conditionName, hasCondition])
+  @@index([hasCondition])
+  @@index([isArchived])
+}
+
+model QuestionnaireAnswer {
+  id            String      @id @default(cuid())
+  doctorNotesId String
+  questionKey   String
+  answer        String?
+  answerType    String?
+  otherValue    String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  isArchived    Boolean     @default(false)
+  archivedAt    DateTime?
+  doctorNotes   DoctorNotes @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
+
+  @@unique([doctorNotesId, questionKey])
+  @@index([doctorNotesId, questionKey])
+  @@index([questionKey])
+  @@index([doctorNotesId])
+  @@index([isArchived])
+}
+
+model DoctorNoteAttachment {
+  id            String             @id @default(uuid())
+  doctorNotesId String
+  fileName      String
+  filePath      String
+  fileUrl       String?
+  mimeType      String
+  sizeInBytes   Int
+  provider      StorageProvider    @default(CLOUDINARY)
+  fileCategory  AttachmentCategory @default(OTHER)
+  section       String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  isArchived    Boolean            @default(false)
+  archivedAt    DateTime?
+  doctorNotes   DoctorNotes        @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
+
+  @@index([doctorNotesId])
+  @@index([doctorNotesId, fileCategory])
+  @@index([fileCategory])
+  @@index([section])
+  @@index([isArchived])
+}
+
+model FormSchema {
+  id          String    @id @default(uuid())
+  version     String    @unique
+  schema      Json
+  description String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  isArchived  Boolean   @default(false)
+  archivedAt  DateTime?
+
+  @@index([version, isActive])
+  @@index([isActive])
+  @@index([isArchived])
+}
+
+model DoctorFormSession {
+  id            String          @id @default(uuid())
+  appointmentId String?
+  patientId     String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  adminId       String?
+  archivedAt    DateTime?
+  isArchived    Boolean         @default(false)
+  admin         Admin?          @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  appointment   Appointment?    @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  patient       PatientDetials? @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([adminId])
+  @@index([appointmentId])
+  @@index([isArchived])
+}
+
+model Reminder {
+  id            String      @id @default(uuid())
+  appointmentId String
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  archivedAt    DateTime?
+  isArchived    Boolean     @default(false)
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@index([isArchived])
+}
+
+model MessageLog {
+  id            String      @id @default(uuid())
+  appointmentId String
+  archivedAt    DateTime?
+  createdAt     DateTime    @default(now())
+  isArchived    Boolean     @default(false)
+  updatedAt     DateTime    @updatedAt
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@index([isArchived])
+}
+
+model Invoice {
+  id            String      @id @default(uuid())
+  invoiceNumber String      @unique // Sequential invoice number (e.g., INV-0001)
+  invoiceDate   DateTime    @default(now())
+  appointmentId String      @unique // One invoice per appointment
+  pdfPath       String?     // Local file path to PDF
+  pdfUrl        String?     // Public URL if stored in cloud
+  paymentId     String?     // Razorpay Payment ID
+  orderId       String?     // Razorpay Order ID
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  isArchived    Boolean     @default(false)
+  archivedAt    DateTime?
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@index([invoiceNumber])
+  @@index([invoiceDate])
+  @@index([isArchived])
+}
+
 enum Role {
   USER
   ADMIN
-} 
+}
 
 enum AppointmentStatus {
   PENDING
@@ -112,567 +628,4 @@ enum AttachmentCategory {
   IMAGE
   DOCUMENT
   OTHER
-}
-
-// ============================================
-// AUTH / CORE MODELS
-// ============================================
-model User {
-  id            String           @id @default(uuid())
-  name          String
-  email         String?          @unique
-  phone         String           @unique
-  role          Role             @default(USER)
-  patients      PatientDetials[]
-  appointments  Appointment[]
-  refreshTokens RefreshToken[]
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
-  isArchived    Boolean          @default(false)
-  archivedAt    DateTime?
-
-  @@index([phone])
-  @@index([email])
-  @@index([isArchived])
-}
-
-model OTP {
-  id        String   @id @default(uuid())
-  phone     String
-  code      String
-  expiresAt DateTime
-  createdAt DateTime @default(now())
-
-  @@index([phone])
-  @@index([expiresAt])
-  @@index([phone, expiresAt]) // Composite index for efficient cleanup queries
-  // Note: Multiple OTPs per phone allowed (for retry scenarios)
-  // Race condition handled at application level with atomic delete+create
-}
-
-model RefreshToken {
-  id        String   @id @default(cuid())
-  token     String   @unique
-  expiresAt DateTime
-  createdAt DateTime @default(now())
-  userId    String?
-  adminId   String?
-  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  admin     Admin?   @relation(fields: [adminId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([adminId])
-  @@index([expiresAt])
-}
-
-model Admin {
-  id                String              @id @default(uuid())
-  name              String
-  email             String              @unique
-  phone             String              @unique
-  slots             Slot[]
-  doctorDaysOff     DoctorDayOff[]
-  appointments      Appointment[]       @relation("DoctorAppointments")
-  refreshTokens     RefreshToken[]
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
-  isArchived        Boolean             @default(false)
-  archivedAt        DateTime?
-  DoctorFormSession DoctorFormSession[]
-
-  @@index([email])
-  @@index([phone])
-  @@index([isArchived])
-}
-
-// ============================================
-// PATIENT / RECALL / FILES
-// ============================================
-model PatientDetials {
-  id                  String              @id @default(uuid())
-  user                User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  userId              String
-  name                String
-  phone               String
-  gender              Gender
-  email               String
-  dateOfBirth         DateTime
-  age                 Int
-  address             String
-  weight              Float
-  height              Float
-  neck                Float?
-  waist               Float?
-  hip                 Float?
-  // Detailed measurements (for weight loss plan)
-  chest               Float?
-  chestFemale         Float?
-  normalChestLung     Float?
-  expandedChestLungs  Float?
-  arms                Float?
-  forearms            Float?
-  wrist               Float?
-  abdomenUpper        Float?
-  abdomenLower        Float?
-  thighUpper          Float?
-  thighLower          Float?
-  calf                Float?
-  ankle               Float?
-  medicalHistory      String?
-  appointmentConcerns String?
-  files               File[]
-  bowelMovement       BowelMovement
-  foodPreference      FoodPreference
-  allergic            String?
-  dailyFoodIntake     String?
-  dailyWaterIntake    Int
-  wakeUpTime          String
-  sleepTime           String
-  sleepQuality        SleepQuality
-  recalls             Recall[]            @relation("PatientRecalls")
-  appointments        Appointment[]
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
-  isArchived          Boolean             @default(false)
-  archivedAt          DateTime?
-  DoctorFormSession   DoctorFormSession[]
-
-  @@unique([userId, name])
-  @@index([userId])
-  @@index([phone])
-  @@index([email])
-  @@index([isArchived])
-}
-
-model Recall {
-  id            String         @id @default(uuid())
-  patient       PatientDetials @relation("PatientRecalls", fields: [patientId], references: [id], onDelete: Cascade)
-  patientId     String
-  appointment   Appointment?   @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-  appointmentId String?        @unique
-  notes         String?
-  entries       RecallEntry[]
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  isArchived    Boolean        @default(false)
-  archivedAt    DateTime?
-
-  @@index([patientId])
-  @@index([appointmentId])
-  @@index([isArchived])
-}
-
-model RecallEntry {
-  id        String   @id @default(uuid())
-  recall    Recall   @relation(fields: [recallId], references: [id], onDelete: Cascade)
-  recallId  String
-  mealType  MealType
-  time      String
-  foodItem  String
-  quantity  String
-  notes     String?
-  createdAt DateTime @default(now())
-
-  @@index([recallId, mealType])
-  @@index([mealType])
-}
-
-model File {
-  id          String          @id @default(uuid())
-  url         String
-  publicId    String
-  fileName    String
-  mimeType    String
-  sizeInBytes Int
-  provider    StorageProvider @default(CLOUDINARY)
-  patient     PatientDetials? @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  patientId   String?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  isArchived  Boolean         @default(false)
-  archivedAt  DateTime?
-
-  @@index([patientId])
-  @@index([isArchived])
-}
-
-// ============================================
-// SLOTS / APPOINTMENTS / DAYS OFF
-// ============================================
-model Slot {
-  id          String          @id @default(uuid())
-  admin       Admin           @relation(fields: [adminId], references: [id], onDelete: Cascade)
-  adminId     String
-  startAt     DateTime
-  endAt       DateTime
-  mode        AppointmentMode
-  isBooked    Boolean         @default(false)
-  appointments Appointment[]  // Changed to one-to-many: multiple appointments can reference same slot
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  isArchived  Boolean         @default(false)
-  archivedAt  DateTime?
-
-  @@unique([adminId, startAt])
-  @@index([adminId, startAt, isBooked])
-  @@index([startAt, isBooked])
-  @@index([isArchived])
-}
-
-model Appointment {
-  id                      String              @id @default(uuid())
-  startAt                 DateTime
-  endAt                   DateTime
-  status                  AppointmentStatus   @default(PENDING)
-  bookingProgress         BookingProgress?    // Track where user left off
-  user                    User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  userId                  String
-  doctor                  Admin               @relation("DoctorAppointments", fields: [doctorId], references: [id], onDelete: Restrict)
-  doctorId                String
-  patient                 PatientDetials      @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  patientId               String
-  slot                    Slot?               @relation(fields: [slotId], references: [id], onDelete: SetNull)
-  slotId                  String?
-  paymentId               String?
-  paymentStatus           String              @default("PENDING")
-  amount                  Int?
-  notes                   String?
-  reminderSent            Boolean             @default(false)
-  shortNoticeReminderSent Boolean             @default(false)
-  reminderTime            DateTime?           // When to send reminder (slotTime - 1 hour)
-  planSlug                String
-  planName                String
-  planPrice               Int
-  planDuration            String
-  planPackageName         String?
-  mode                    AppointmentMode
-  doctorNotes             DoctorNotes?
-  recall                  Recall?
-  createdAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
-  isArchived              Boolean             @default(false)
-  archivedAt              DateTime?
-  isDeletedByAdmin        Boolean             @default(false)
-  deletedByAdminAt        DateTime?
-  deletedByAdminReason    String?
-  DoctorFormSession       DoctorFormSession[]
-  Reminder                Reminder[]
-  MessageLog              MessageLog[]
-
-  @@index([startAt])
-  @@index([doctorId, startAt])
-  @@index([patientId, startAt])
-  @@index([status, startAt])
-  @@index([bookingProgress]) // Frequently queried for booking flow
-  @@index([status, bookingProgress]) // Common query pattern: PENDING appointments by progress
-  @@index([slotId, status]) // Prevent multiple PENDING appointments per slot
-  @@index([reminderTime, reminderSent]) // For cron job to find appointments needing reminders
-  @@index([isArchived])
-  @@index([isDeletedByAdmin])
-  // Note: Partial unique constraint (only one PENDING per slot) added via migration
-  // See prisma/migrations/add_partial_unique_constraint.sql
-}
-
-model DoctorDayOff {
-  id         String    @id @default(uuid())
-  admin      Admin     @relation(fields: [adminId], references: [id], onDelete: Cascade)
-  adminId    String
-  date       DateTime
-  reason     String?
-  createdAt  DateTime  @default(now())
-  isArchived Boolean   @default(false)
-  archivedAt DateTime?
-
-  @@unique([adminId, date])
-  @@index([date])
-  @@index([adminId, date])
-  @@index([isArchived])
-}
-
-model WebhookEvent {
-  id        String   @id @default(uuid())
-  eventId   String   @unique
-  createdAt DateTime @default(now())
-
-  @@index([createdAt])
-}
-
-// ============================================
-// HYBRID DOCTOR NOTES ARCHITECTURE
-// ============================================
-
-model DoctorNotes {
-  id            String      @id @default(cuid())
-  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-  appointmentId String      @unique
-
-  // Form versioning - allows schema evolution without migrations
-  formVersion String @default("1.0.0")
-
-  // Status tracking
-  isDraft     Boolean   @default(true)
-  isCompleted Boolean   @default(false)
-  completedAt DateTime?
-  submittedAt DateTime? // When doctor finalized/submitted the note
-
-  // General notes/remarks at top level
-  notes String? @db.Text
-
-  // Metadata
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  createdBy String? // Admin/Doctor ID
-  updatedBy String? // Admin/Doctor ID
-
-  // Soft delete
-  isArchived Boolean   @default(false)
-  archivedAt DateTime?
-
-  // HYBRID APPROACH: Structured + JSONB
-  // Core structured fields (rarely change)
-  personalHistory         String?   @db.Text
-  reasonForJoiningProgram String?   @db.Text
-  ethnicity               String?
-  joiningDate             DateTime?
-  expiryDate              DateTime?
-  dietPrescriptionDate    DateTime?
-  durationOfDiet          String?
-  maritalStatus           String?
-  numberOfChildren        Int?
-  dietPreference          String?
-  wakeupTime              String?
-  bedTime                 String?
-  dayNap                  String?
-  workoutTiming           String?
-  workoutType             String?
-
-  // JSONB for flexible, evolving form sections (explicit PostgreSQL JSONB)
-  formData Json? @db.JsonB // All form sections in flexible JSON structure
-
-  // Cached analytics data (precomputed values for performance)
-  analyticsData Json? @db.JsonB // Precomputed analytics, summaries, etc.
-
-  // Structured relations for queryable, repeated patterns
-  mealEntries          MealEntry[]
-  foodFrequencyItems   FoodFrequencyItem[]
-  healthConditions     HealthCondition[]
-  questionnaireAnswers QuestionnaireAnswer[]
-
-  // File attachments
-  attachments DoctorNoteAttachment[]
-
-  @@index([appointmentId])
-  @@index([createdAt])
-  @@index([formVersion])
-  @@index([isCompleted, submittedAt])
-  @@index([isDraft])
-  @@index([isArchived, archivedAt])
-  @@index([createdBy])
-  @@index([submittedAt])
-  // PostgreSQL JSONB GIN indexes (created via raw SQL - see POSTGRESQL_OPTIMIZATIONS.sql)
-  @@map("doctor_notes")
-}
-
-// ============================================
-// STRUCTURED MODELS FOR REPEATED PATTERNS
-// ============================================
-
-model MealEntry {
-  id            String      @id @default(cuid())
-  doctorNotesId String
-  doctorNotes   DoctorNotes @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
-
-  mealPeriod MealPeriod // MORNING_INTAKE, BREAKFAST, LUNCH, etc.
-  time       String?
-
-  // Flexible food items storage (explicit PostgreSQL JSONB)
-  foodItems Json @db.JsonB // Array of { name, quantity, checked, notes }
-
-  // Common fields
-  waterIntake Int?
-  medicines   String? @db.Text
-  notes       String? @db.Text
-
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  isArchived Boolean   @default(false)
-  archivedAt DateTime?
-
-  @@unique([doctorNotesId, mealPeriod]) // One entry per meal period per note
-  @@index([doctorNotesId, mealPeriod])
-  @@index([mealPeriod])
-  @@index([doctorNotesId])
-  @@index([isArchived])
-}
-
-model FoodFrequencyItem {
-  id            String      @id @default(cuid())
-  doctorNotesId String
-  doctorNotes   DoctorNotes @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
-
-  category String // "NonVeg", "Packaged", "Sweetener", "Drink", "Lifestyle", "HealthyFood", etc.
-  itemName String // "Poha", "Fish", "Sugar", "Tea", etc. - DYNAMIC!
-
-  checked   Boolean @default(false)
-  quantity  String? // Flexible quantity format
-  frequency String? // "Daily", "Weekly", "Monthly", etc.
-
-  // Flexible metadata for item-specific data (explicit PostgreSQL JSONB)
-  metadata Json? @db.JsonB // { prepType, qtyPieces, qtyTspTbsp, etc. }
-
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  isArchived Boolean   @default(false)
-  archivedAt DateTime?
-
-  @@unique([doctorNotesId, category, itemName]) // Prevent duplicates
-  @@index([doctorNotesId, category])
-  @@index([category, itemName])
-  @@index([doctorNotesId])
-  @@index([checked, category])
-  @@index([isArchived])
-}
-
-model HealthCondition {
-  id            String      @id @default(cuid())
-  doctorNotesId String
-  doctorNotes   DoctorNotes @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
-
-  conditionName String // "High B.P", "Diabetes", etc. - DYNAMIC!
-  hasCondition  String // "Yes" or "No"
-  notes         String? @db.Text // Additional details
-
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  isArchived Boolean   @default(false)
-  archivedAt DateTime?
-
-  @@unique([doctorNotesId, conditionName]) // Prevent duplicates
-  @@index([doctorNotesId])
-  @@index([conditionName, hasCondition])
-  @@index([hasCondition])
-  @@index([isArchived])
-}
-
-model QuestionnaireAnswer {
-  id            String      @id @default(cuid())
-  doctorNotesId String
-  doctorNotes   DoctorNotes @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
-
-  questionKey String // "foodAllergies", "eatingSpeed", etc. - DYNAMIC!
-  answer      String? @db.Text // Answer value
-  answerType  String? // "text", "select", "radio", "boolean", etc.
-
-  // For "Other" options
-  otherValue String? @db.Text
-
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  isArchived Boolean   @default(false)
-  archivedAt DateTime?
-
-  @@unique([doctorNotesId, questionKey]) // One answer per question
-  @@index([doctorNotesId, questionKey])
-  @@index([questionKey])
-  @@index([doctorNotesId])
-  @@index([isArchived])
-}
-
-model DoctorNoteAttachment {
-  id            String      @id @default(uuid())
-  doctorNotesId String
-  doctorNotes   DoctorNotes @relation(fields: [doctorNotesId], references: [id], onDelete: Cascade)
-
-  fileName    String
-  filePath    String // Path to uploaded file
-  fileUrl     String? // Public URL if stored in cloud
-  mimeType    String
-  sizeInBytes Int
-  provider    StorageProvider @default(CLOUDINARY)
-
-  fileCategory AttachmentCategory @default(OTHER) // Grouping attachments
-  section      String? // Which section this belongs to (e.g., "DietPrescribed")
-
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  isArchived Boolean   @default(false)
-  archivedAt DateTime?
-
-  @@index([doctorNotesId])
-  @@index([doctorNotesId, fileCategory])
-  @@index([fileCategory])
-  @@index([section])
-  @@index([isArchived])
-}
-
-// ============================================
-// FORM SCHEMA VERSIONING
-// ============================================
-
-model FormSchema {
-  id      String @id @default(uuid())
-  version String @unique // "1.0.0", "1.1.0", etc.
-
-  // JSON schema definition of form structure (explicit PostgreSQL JSONB)
-  schema Json @db.JsonB // Full form schema definition
-
-  // Metadata
-  description String?   @db.Text
-  isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  isArchived  Boolean   @default(false)
-  archivedAt  DateTime?
-
-  @@index([version, isActive])
-  @@index([isActive])
-  @@index([isArchived])
-}
-
-// ============================================
-// ADDITIONAL MODELS
-// ============================================
-model DoctorFormSession {
-  id            String          @id @default(uuid())
-  patient       PatientDetials? @relation(fields: [patientId], references: [id], onDelete: Cascade)
-  patientId     String?
-  admin         Admin?          @relation(fields: [adminId], references: [id], onDelete: Cascade)
-  adminId       String?
-  appointment   Appointment?    @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-  appointmentId String?
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
-  isArchived    Boolean         @default(false)
-  archivedAt    DateTime?
-
-  @@index([patientId])
-  @@index([adminId])
-  @@index([appointmentId])
-  @@index([isArchived])
-}
-
-model Reminder {
-  id            String      @id @default(uuid())
-  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-  appointmentId String
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-  isArchived    Boolean     @default(false)
-  archivedAt    DateTime?
-
-  @@index([appointmentId])
-  @@index([isArchived])
-}
-
-model MessageLog {
-  id            String      @id @default(uuid())
-  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
-  appointmentId String
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-  isArchived    Boolean     @default(false)
-  archivedAt    DateTime?
-
-  @@index([appointmentId])
-  @@index([isArchived])
 }

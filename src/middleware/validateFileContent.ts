@@ -12,7 +12,12 @@ export function validateFileContentMiddleware(
   next: NextFunction
 ) {
   // Default allowed types (images)
-  const defaultAllowedMimeTypes = ["image/jpeg", "image/jpg", "image/png"];
+  const defaultAllowedMimeTypes = [
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/x-png", // Some systems use this variant for PNG
+  ];
 
   // For doctor notes routes, also allow PDFs
   const isDoctorNotesRoute = req.path.includes("/doctor-notes");

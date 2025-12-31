@@ -8,6 +8,7 @@ import {
   adminGetSlotsHandler,
   adminGetDayOffListHandler,
   previewSlotsHandler,
+  getSlotDateRangeHandler,
 } from "./slots.controller";
 import { requireRole } from "../../middleware/requiredRole";
 import { Role } from "@prisma/client";
@@ -76,6 +77,15 @@ slotRoutes.get(
   requireAuth,
   requireRole(Role.ADMIN),
   adminGetDayOffListHandler
+);
+
+// ADMIN: get slot date range (earliest and latest slot dates)
+slotRoutes.get(
+  "/admin/date-range",
+  attachUser,
+  requireAuth,
+  requireRole(Role.ADMIN),
+  getSlotDateRangeHandler
 );
 
 // Public (patient): get available slots for a date + mode
