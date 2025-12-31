@@ -1,121 +1,10 @@
-import nodemailer from "nodemailer";
-import dotenv from "dotenv";
-
-// Ensure environment variables are loaded
-dotenv.config();
+import { resend, getFromEmail } from "./resend";
 
 /**
- * Gmail SMTP Mailer Utility
- * Configures Nodemailer with Gmail SMTP for sending emails
+ * Email Utility Functions
+ * Uses Resend for sending emails
+ * All templates are preserved exactly as they were
  */
-
-/**
- * Get email credentials from environment variables (reads fresh each time)
- */
-function getEmailCredentials(): { user: string; pass: string } | null {
-  const EMAIL_USER = process.env.EMAIL_USER;
-  const EMAIL_PASS = process.env.EMAIL_PASS;
-
-  if (!EMAIL_USER || !EMAIL_PASS) {
-    return null;
-  }
-
-  return { user: EMAIL_USER, pass: EMAIL_PASS };
-}
-
-// Cache transporter instance
-let _transporter: nodemailer.Transporter | null = null;
-let _cachedUser: string | undefined = undefined;
-let _cachedPass: string | undefined = undefined;
-
-/**
- * Get or create transporter instance with Gmail SMTP configuration
- * Creates a new transporter if credentials have changed (after server restart)
- */
-function getTransporter(): nodemailer.Transporter {
-  const credentials = getEmailCredentials();
-
-  if (!credentials) {
-    throw new Error(
-      "EMAIL_USER or EMAIL_PASS not configured in environment variables"
-    );
-  }
-
-  // Recreate transporter if credentials have changed (after server restart with new .env)
-  if (
-    !_transporter ||
-    _cachedUser !== credentials.user ||
-    _cachedPass !== credentials.pass
-  ) {
-    _cachedUser = credentials.user;
-    _cachedPass = credentials.pass;
-    _transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: credentials.user,
-        pass: credentials.pass,
-      },
-    });
-    console.log(
-      `[MAILER] Transporter created/updated for: ${credentials.user}`
-    );
-  }
-
-  return _transporter;
-}
-
-// Export transporter that uses getTransporter internally
-// This ensures credentials are read fresh from env vars each time
-export const transporter = {
-  sendMail: (options: any) => getTransporter().sendMail(options),
-  verify: () => getTransporter().verify(),
-  close: () => {
-    if (_transporter) {
-      _transporter.close();
-      _transporter = null;
-    }
-  },
-} as nodemailer.Transporter;
-
-/**
- * Verify SMTP connection during server startup
- * Logs connection status for debugging
- */
-export async function verifyMailerConnection(): Promise<void> {
-  const credentials = getEmailCredentials();
-
-  if (!credentials) {
-    console.warn(
-      "[MAILER] ⚠️ Email credentials not configured. Skipping verification."
-    );
-    console.warn(
-      "[MAILER] Please set EMAIL_USER and EMAIL_PASS in your .env file"
-    );
-    return;
-  }
-
-  try {
-    const transporter = getTransporter();
-    await transporter.verify();
-    console.log("[MAILER] ✅ SMTP connection verified successfully");
-    console.log("[MAILER] Email service ready (Gmail SMTP)");
-    console.log(`[MAILER] Using email: ${credentials.user}`);
-  } catch (error: any) {
-    console.error("[MAILER] ❌ SMTP connection verification failed:");
-    console.error("[MAILER] Error:", error.message);
-    console.error(
-      "[MAILER] Please check your EMAIL_USER and EMAIL_PASS environment variables"
-    );
-    console.error(
-      "[MAILER] For Gmail, you may need to use an App Password instead of your regular password"
-    );
-    console.error("[MAILER] Steps to create Gmail App Password:");
-    console.error("  1. Go to your Google Account settings");
-    console.error("  2. Security > 2-Step Verification > App passwords");
-    console.error("  3. Generate a new app password for 'Mail'");
-    console.error("  4. Use that 16-character password in EMAIL_PASS");
-  }
-}
 
 /**
  * Send password reset email
@@ -130,25 +19,18 @@ export async function sendPasswordResetEmail(
   console.log("[MAILER] sendPasswordResetEmail called");
   console.log("[MAILER] Recipient:", to);
 
-  const credentials = getEmailCredentials();
-  console.log("[MAILER] EMAIL_USER configured:", !!credentials?.user);
-  console.log("[MAILER] EMAIL_PASS configured:", !!credentials?.pass);
-
-  if (!credentials) {
+  if (!process.env.RESEND_API_KEY) {
     console.error(
-      "[MAILER] ❌ Cannot send email: EMAIL_USER or EMAIL_PASS not configured"
+      "[MAILER] ❌ Cannot send email: RESEND_API_KEY not configured"
     );
-    console.error(
-      "[MAILER] Please set EMAIL_USER and EMAIL_PASS in your .env file"
-    );
+    console.error("[MAILER] Please set RESEND_API_KEY in your .env file");
     return false;
   }
 
   try {
-    const transporter = getTransporter();
-    console.log("[MAILER] Creating mail options...");
-    const mailOptions = {
-      from: `"Anubha Nutrition Clinic" <${credentials.user}>`,
+    console.log("[MAILER] Creating email options...");
+    const { data, error } = await resend.emails.send({
+      from: getFromEmail(),
       to: to,
       subject: "Reset your password",
       html: `
@@ -209,23 +91,23 @@ export async function sendPasswordResetEmail(
           </body>
         </html>
       `,
-    };
+    });
 
-    console.log("[MAILER] Sending email via transporter...");
-    const info = await transporter.sendMail(mailOptions);
+    if (error) {
+      console.error("[MAILER] ❌ Failed to send password reset email:");
+      console.error("[MAILER] Error:", error);
+      console.error("[MAILER] Recipient:", to);
+      return false;
+    }
+
     console.log("[MAILER] ✅ Password reset email sent successfully");
-    console.log("[MAILER] Message ID:", info.messageId);
-    console.log("[MAILER] Accepted recipients:", info.accepted);
-    console.log("[MAILER] Rejected recipients:", info.rejected);
+    console.log("[MAILER] Email ID:", data?.id);
     return true;
   } catch (error: any) {
     console.error("[MAILER] ❌ Failed to send password reset email:");
     console.error("[MAILER] Error type:", error.constructor?.name);
     console.error("[MAILER] Error message:", error.message);
-    console.error("[MAILER] Error code:", error.code);
-    console.error("[MAILER] Error response:", error.response);
     console.error("[MAILER] Recipient:", to);
-    console.error("[MAILER] From:", credentials.user);
     console.error("[MAILER] Full error:", error);
     // Don't throw error - log only to prevent breaking the response
     return false;
@@ -242,19 +124,14 @@ export async function sendAddEmailVerificationOtp(
   to: string,
   otp: string
 ): Promise<boolean> {
-  const credentials = getEmailCredentials();
-
-  if (!credentials) {
-    console.error(
-      "[MAILER] Cannot send email: EMAIL_USER or EMAIL_PASS not configured"
-    );
+  if (!process.env.RESEND_API_KEY) {
+    console.error("[MAILER] Cannot send email: RESEND_API_KEY not configured");
     return false;
   }
 
   try {
-    const transporter = getTransporter();
-    const mailOptions = {
-      from: `"Anubha Nutrition Clinic" <${credentials.user}>`,
+    const { data, error } = await resend.emails.send({
+      from: getFromEmail(),
       to: to,
       subject: "Verify Your Email Address - Verification Code",
       html: `
@@ -310,11 +187,17 @@ export async function sendAddEmailVerificationOtp(
           </body>
         </html>
       `,
-    };
+    });
 
-    const info = await transporter.sendMail(mailOptions);
+    if (error) {
+      console.error("[MAILER] ❌ Failed to send email verification OTP:");
+      console.error("[MAILER] Error:", error);
+      console.error("[MAILER] Recipient:", to);
+      return false;
+    }
+
     console.log("[MAILER] ✅ Email verification OTP sent successfully");
-    console.log("[MAILER] Message ID:", info.messageId);
+    console.log("[MAILER] Email ID:", data?.id);
     return true;
   } catch (error: any) {
     console.error("[MAILER] ❌ Failed to send email verification OTP:");
@@ -331,19 +214,14 @@ export async function sendAddEmailVerificationOtp(
  * @returns Promise<boolean> - true if email sent successfully, false otherwise
  */
 export async function sendEmailOtp(to: string, otp: string): Promise<boolean> {
-  const credentials = getEmailCredentials();
-
-  if (!credentials) {
-    console.error(
-      "[MAILER] Cannot send email: EMAIL_USER or EMAIL_PASS not configured"
-    );
+  if (!process.env.RESEND_API_KEY) {
+    console.error("[MAILER] Cannot send email: RESEND_API_KEY not configured");
     return false;
   }
 
   try {
-    const transporter = getTransporter();
-    const mailOptions = {
-      from: `"Anubha Nutrition Clinic" <${credentials.user}>`,
+    const { data, error } = await resend.emails.send({
+      from: getFromEmail(),
       to: to,
       subject: "Verify Your Account - Verification Code",
       html: `
@@ -399,11 +277,17 @@ export async function sendEmailOtp(to: string, otp: string): Promise<boolean> {
           </body>
         </html>
       `,
-    };
+    });
 
-    const info = await transporter.sendMail(mailOptions);
+    if (error) {
+      console.error("[MAILER] ❌ Failed to send email OTP:");
+      console.error("[MAILER] Error:", error);
+      console.error("[MAILER] Recipient:", to);
+      return false;
+    }
+
     console.log("[MAILER] ✅ Email OTP sent successfully");
-    console.log("[MAILER] Message ID:", info.messageId);
+    console.log("[MAILER] Email ID:", data?.id);
     return true;
   } catch (error: any) {
     console.error("[MAILER] ❌ Failed to send email OTP:");

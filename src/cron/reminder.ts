@@ -8,6 +8,12 @@ import {
 import { getSingleAdmin } from "../modules/slots/slots.services";
 
 /**
+ * Lock flag to prevent overlapping cron executions
+ * If a previous execution is still running, skip the next scheduled run
+ */
+let isRunning = false;
+
+/**
  * Appointment Reminder Cron Job
  * Runs every 10 minutes to check for appointments with reminderTime in the current window
  * Sends "reminderbooking" template WhatsApp reminders to:
@@ -22,10 +28,21 @@ export function startAppointmentReminderCron() {
 
   // Run every 10 minutes: */10 * * * *
   cron.schedule("*/10 * * * *", async () => {
+    // Skip if previous execution is still running
+    if (isRunning) {
+      console.warn(
+        "[CRON] ⚠️ Previous execution still running, skipping this run to prevent overlap"
+      );
+      return;
+    }
+
+    isRunning = true;
     try {
       await checkAndSendReminders();
     } catch (error: any) {
       console.error("[CRON] Error in appointment reminder cron:", error);
+    } finally {
+      isRunning = false;
     }
   });
 

@@ -470,12 +470,18 @@ export async function createOrderHandler(req: Request, res: Response) {
       });
     }
 
-    // Check if appointment already exists (OUTSIDE transaction)
-    const existingAppointment = await prisma.appointment.findFirst({
+    // CRITICAL: Check if appointment already exists (OUTSIDE transaction)
+    // Match by: userId, patientId, slotId, startAt (date), planSlug, and status
+    // This ensures we reuse the same pending appointment instead of creating duplicates
+    // PRIORITY: Check for PENDING appointments first, then CONFIRMED
+    const existingPendingAppointment = await prisma.appointment.findFirst({
       where: {
         slotId: slot.id,
         patientId: patientId,
         userId: userId,
+        startAt: slot.startAt, // Also match by date to prevent duplicates for same slot on different dates
+        planSlug: planSlug, // Match by plan to prevent mixing different plans
+        status: "PENDING", // Only check for PENDING appointments
         isArchived: false,
       },
       include: {
@@ -487,13 +493,42 @@ export async function createOrderHandler(req: Request, res: Response) {
       },
     });
 
+    // Also check for CONFIRMED appointments to prevent creating duplicates
+    const existingConfirmedAppointment = await prisma.appointment.findFirst({
+      where: {
+        slotId: slot.id,
+        patientId: patientId,
+        userId: userId,
+        startAt: slot.startAt,
+        planSlug: planSlug,
+        status: "CONFIRMED",
+        isArchived: false,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+    });
+
+    // Use pending appointment if found, otherwise check confirmed
+    const existingAppointment = existingPendingAppointment || existingConfirmedAppointment;
+
     if (existingAppointment) {
       console.log(
         "[PAYMENT] ⚠️ Appointment already exists for this slot/patient. Using existing appointment:",
-        existingAppointment.id
+        existingAppointment.id,
+        {
+          status: existingAppointment.status,
+          slotId: slot.id,
+          patientId: patientId,
+          startAt: slot.startAt,
+          planSlug: planSlug,
+        }
       );
 
       if (existingAppointment.status === "CONFIRMED") {
+        console.log(
+          "[PAYMENT] ⚠️ CONFIRMED appointment already exists - cannot create payment order for confirmed appointment"
+        );
         return res.status(400).json({
           success: false,
           error:
@@ -501,7 +536,12 @@ export async function createOrderHandler(req: Request, res: Response) {
         });
       }
 
+      // Use the existing PENDING appointment - never create a new one
       appointment = existingAppointment;
+      console.log(
+        "[PAYMENT] ✅ Reusing existing PENDING appointment:",
+        appointment.id
+      );
 
       // Check if existing appointment has a valid order
       if (appointment.paymentId && appointment.paymentId.startsWith("order_")) {
@@ -586,35 +626,115 @@ export async function createOrderHandler(req: Request, res: Response) {
           }
         );
       } else {
-        // Create new appointment
-        const doctorId = await getSingleAdminId();
-        appointment = await prisma.$transaction(
-          async (tx) => {
-            return await tx.appointment.create({
-              data: {
-                userId,
-                doctorId,
-                patientId,
-                slotId: slot.id,
-                startAt: slot.startAt,
-                endAt: slot.endAt,
-                paymentId: order.id,
-                amount: plan.price,
-                status: "PENDING",
-                mode: modeEnum,
-                planSlug,
-                planName: plan.name,
-                planPrice: plan.price,
-                planDuration: plan.duration,
-                planPackageName: plan.packageName,
-              },
-            });
-          },
-          {
-            timeout: 3000,
-            maxWait: 2000,
-          }
+        // CRITICAL: This should NEVER happen if duplicate detection is working correctly
+        // But add triple-check to prevent creating duplicates due to race conditions
+        console.warn(
+          "[PAYMENT] ⚠️ No existing appointment found - performing final check before creating"
         );
+        
+        const finalCheckAppointment = await prisma.appointment.findFirst({
+          where: {
+            OR: [
+              // Check by slotId, patientId, userId, startAt, planSlug
+              {
+                slotId: slot.id,
+                patientId: patientId,
+                userId: userId,
+                startAt: slot.startAt,
+                planSlug: planSlug,
+                isArchived: false,
+              },
+              // Also check without slotId (for appointments without slots)
+              {
+                patientId: patientId,
+                userId: userId,
+                startAt: slot.startAt,
+                planSlug: planSlug,
+                status: "PENDING",
+                isArchived: false,
+              },
+            ],
+          },
+          orderBy: {
+            createdAt: "desc",
+          },
+        });
+
+        if (finalCheckAppointment) {
+          console.log(
+            "[PAYMENT] ✅ Found existing appointment on final check, reusing:",
+            finalCheckAppointment.id,
+            {
+              status: finalCheckAppointment.status,
+              slotId: finalCheckAppointment.slotId,
+            }
+          );
+          
+          if (finalCheckAppointment.status === "CONFIRMED") {
+            return res.status(400).json({
+              success: false,
+              error: "Appointment is already confirmed. Please use the existing appointment.",
+            });
+          }
+
+          appointment = finalCheckAppointment;
+          // Update existing appointment with payment info
+          await prisma.$transaction(
+            async (tx) => {
+              await tx.appointment.update({
+                where: { id: appointment.id },
+                data: {
+                  paymentId: order.id,
+                  amount: plan.price,
+                  paymentStatus: "PENDING",
+                  // Ensure slotId is set if it wasn't before
+                  slotId: slot.id,
+                  startAt: slot.startAt,
+                  endAt: slot.endAt,
+                  mode: modeEnum,
+                } as any,
+              });
+            },
+            {
+              timeout: 3000,
+              maxWait: 2000,
+            }
+          );
+        } else {
+          // Only create new appointment if absolutely no existing appointment found
+          // This should be rare - most appointments should be created via createAppointmentHandler
+          console.log(
+            "[PAYMENT] Creating new PENDING appointment (OLD FLOW - should use appointmentId flow instead)"
+          );
+          const doctorId = await getSingleAdminId();
+          appointment = await prisma.$transaction(
+            async (tx) => {
+              return await tx.appointment.create({
+                data: {
+                  userId,
+                  doctorId,
+                  patientId,
+                  slotId: slot.id,
+                  startAt: slot.startAt,
+                  endAt: slot.endAt,
+                  paymentId: order.id,
+                  amount: plan.price,
+                  status: "PENDING", // Always create as PENDING
+                  mode: modeEnum,
+                  planSlug,
+                  planName: plan.name,
+                  planPrice: plan.price,
+                  planDuration: plan.duration,
+                  planPackageName: plan.packageName,
+                },
+              });
+            },
+            {
+              timeout: 3000,
+              maxWait: 2000,
+            }
+          );
+        }
       }
       console.log(
         `[PAYMENT] ✅ ${appointment ? "Updated" : "Created"} appointment in ${
@@ -755,23 +875,42 @@ export async function verifyPaymentHandler(req: Request, res: Response) {
     // CRITICAL: Verify Razorpay signature before proceeding
     // Signature verification ensures payment data integrity
     // If signature is invalid, payment is REJECTED and appointment remains PENDING
-    const isValidSignature = paymentService.verifyPaymentSignature(
-      orderId,
-      paymentId,
-      signature,
-      process.env.RAZORPAY_KEY_SECRET!
-    );
+    // NOTE: If Razorpay keys were changed, signatures from orders created with old keys will fail
+    let isValidSignature = false;
+    try {
+      isValidSignature = paymentService.verifyPaymentSignature(
+        orderId,
+        paymentId,
+        signature,
+        process.env.RAZORPAY_KEY_SECRET!
+      );
+    } catch (sigError: any) {
+      console.error(
+        `[PAYMENT:${requestId}] ❌ Signature verification error:`,
+        sigError.message
+      );
+      return res.status(400).json({
+        success: false,
+        error: "Payment signature verification failed. Please contact support.",
+      });
+    }
 
     if (!isValidSignature) {
       console.error(
         `[PAYMENT:${requestId}] ❌ Signature mismatch - Payment verification REJECTED`
       );
+      console.error(`[PAYMENT:${requestId}] Order ID: ${orderId}`);
+      console.error(`[PAYMENT:${requestId}] Payment ID: ${paymentId}`);
       console.error(
         `[PAYMENT:${requestId}] ❌ Appointment remains PENDING - payment signature invalid`
       );
+      console.error(
+        `[PAYMENT:${requestId}] NOTE: If you recently changed Razorpay keys, old orders may fail signature verification`
+      );
       return res.status(400).json({
         success: false,
-        error: "Invalid payment signature. Payment verification failed.",
+        error:
+          "Invalid payment signature. Please try creating a new payment order.",
       });
     }
 

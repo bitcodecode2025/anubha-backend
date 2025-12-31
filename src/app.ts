@@ -19,7 +19,7 @@ import { startAppointmentReminderCron } from "./cron/reminder";
 import { testMsg91Connection } from "./services/whatsapp.service";
 import { apiLogger } from "./middleware/apiLogger";
 import { env, validateRazorpayConfig } from "./config/env";
-import { verifyMailerConnection } from "./utils/mailer";
+// Email service (Resend) - no verification needed, handled by Resend SDK
 
 // Environment variables are validated in ./config/env.ts
 // This will throw an error if required variables are missing
@@ -299,8 +299,7 @@ async function startServer() {
     // Start appointment reminder cron job
     startAppointmentReminderCron();
 
-    // Verify mailer connection
-    await verifyMailerConnection();
+    // Email service (Resend) is ready - no connection verification needed
 
     // Start Express server
     app.listen(PORT, "0.0.0.0", () => {

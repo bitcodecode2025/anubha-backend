@@ -447,20 +447,20 @@ export async function createAppointmentHandler(req: Request, res: Response) {
 
       // CRITICAL: Check if a CONFIRMED appointment already exists for this patient and plan
       // This prevents creating new PENDING appointments when a CONFIRMED appointment already exists
-      // For weight loss and other plans: check by userId, patientId, planSlug, and startAt (if provided)
+      // Match by: userId, patientId, planSlug, startAt (date), and optionally slotId
       // This ensures we don't create pending appointments when confirmed ones exist for the same booking
       const confirmedWhere: any = {
         userId,
         patientId,
         planSlug,
+        startAt: appointmentStartAt, // Always match by date/time
         status: "CONFIRMED",
         isArchived: false, // Only check non-archived appointments
       };
 
-      // If startAt is provided and valid, also match by startAt to ensure same booking
-      // This prevents creating pending appointments for confirmed bookings at the same time
-      if (appointmentStartAt) {
-        confirmedWhere.startAt = appointmentStartAt;
+      // If slotId is provided, also match by slotId for more precise detection
+      if (finalSlotId) {
+        confirmedWhere.slotId = finalSlotId;
       }
 
       const existingConfirmedAppointment = await prisma.appointment.findFirst({
@@ -472,20 +472,21 @@ export async function createAppointmentHandler(req: Request, res: Response) {
 
       if (existingConfirmedAppointment) {
         console.log(
-          " [BACKEND] ⚠️ CONFIRMED appointment already exists for this patient and plan. Returning existing appointment:",
+          " [BACKEND] ⚠️ CONFIRMED appointment already exists for this booking. Returning existing appointment:",
           existingConfirmedAppointment.id,
           {
             userId,
             patientId,
             planSlug,
-            startAt: appointmentStartAt || "not specified",
+            startAt: appointmentStartAt,
+            slotId: finalSlotId || "none",
           }
         );
 
         // Return the existing CONFIRMED appointment - don't create a new PENDING one
         return res.status(200).json({
           success: true,
-          message: "Confirmed appointment already exists for this plan",
+          message: "Confirmed appointment already exists for this booking",
           data: existingConfirmedAppointment,
           updated: false, // Indicate this is an existing confirmed appointment
           alreadyConfirmed: true,
@@ -494,17 +495,24 @@ export async function createAppointmentHandler(req: Request, res: Response) {
 
       // CRITICAL: Check if a PENDING appointment already exists for this logical booking
       // This prevents duplicate PENDING appointments when the booking flow is called multiple times
-      // Matches by: userId, patientId, startAt (slotTime), planSlug
-      // This works whether or not slotId is provided
+      // Matches by: userId, patientId, startAt (slotTime), planSlug, and optionally slotId
+      // This ensures we reuse the same appointment across all booking steps
+      const pendingWhere: any = {
+        userId,
+        patientId,
+        startAt: appointmentStartAt, // Match by slot time/date
+        planSlug,
+        status: "PENDING",
+        isArchived: false, // Only check non-archived appointments
+      };
+
+      // If slotId is provided, also match by slotId for more precise duplicate detection
+      if (finalSlotId) {
+        pendingWhere.slotId = finalSlotId;
+      }
+
       const existingPendingAppointment = await prisma.appointment.findFirst({
-        where: {
-          userId,
-          patientId,
-          startAt: appointmentStartAt, // Match by slot time
-          planSlug,
-          status: "PENDING",
-          isArchived: false, // Only check non-archived appointments
-        },
+        where: pendingWhere,
         orderBy: {
           createdAt: "desc", // Get the most recent one
         },
