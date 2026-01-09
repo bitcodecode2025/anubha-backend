@@ -7,7 +7,7 @@ import {
   isPastDate,
   formatSlotLabel,
 } from "./slots.utils";
-import { zonedTimeToUtc, formatInTimeZone } from "date-fns-tz";
+import { fromZonedTime, formatInTimeZone } from "date-fns-tz";
 import { getDay } from "date-fns";
 
 const BUSINESS_TIMEZONE = "Asia/Kolkata";
@@ -37,13 +37,13 @@ export async function getSingleAdmin() {
 
 /**
  * Check if a date (YYYY-MM-DD) is a Sunday in IST timezone.
- * Uses zonedTimeToUtc to properly interpret the date string as IST, then checks day of week.
+ * Uses fromZonedTime to properly interpret the date string as IST, then checks day of week.
  */
 export function isSunday(dateStr: string) {
   // Create date string at start of day in IST: "2025-11-23T00:00:00"
   const istDateTimeString = `${dateStr}T00:00:00`;
   // Convert IST time to UTC Date object
-  const dateInIST = zonedTimeToUtc(istDateTimeString, BUSINESS_TIMEZONE);
+  const dateInIST = fromZonedTime(istDateTimeString, BUSINESS_TIMEZONE);
   // Get day of week (0 = Sunday, 6 = Saturday) using date-fns getDay
   return getDay(dateInIST) === 0;
 }
@@ -61,9 +61,9 @@ export async function generateSlotsForRange(opts: {
 
   // Create dates in IST timezone for consistent comparison
   // startDate and endDate are in YYYY-MM-DD format
-  // Use zonedTimeToUtc to properly convert IST times to UTC Date objects
-  const start = zonedTimeToUtc(`${startDate}T00:00:00`, BUSINESS_TIMEZONE); // IST start of day
-  const end = zonedTimeToUtc(`${endDate}T23:59:59`, BUSINESS_TIMEZONE); // IST end of day
+  // Use fromZonedTime to properly convert IST times to UTC Date objects
+  const start = fromZonedTime(`${startDate}T00:00:00`, BUSINESS_TIMEZONE); // IST start of day
+  const end = fromZonedTime(`${endDate}T23:59:59`, BUSINESS_TIMEZONE); // IST end of day
 
   if (end < start) {
     throw new Error("endDate cannot be before startDate");
@@ -238,7 +238,7 @@ export async function generateSlotsForRange(opts: {
     ).padStart(2, "0")}`;
     // Convert next day start in IST to UTC Date
     cursor.setTime(
-      zonedTimeToUtc(`${nextDateStr}T00:00:00`, BUSINESS_TIMEZONE).getTime()
+      fromZonedTime(`${nextDateStr}T00:00:00`, BUSINESS_TIMEZONE).getTime()
     );
   }
 
@@ -263,7 +263,7 @@ export async function addDoctorDayOff(opts: {
 }) {
   const adminId = await getSingleAdminId();
   // Convert date string to UTC Date object representing start of day in IST
-  const date = zonedTimeToUtc(`${opts.date}T00:00:00`, BUSINESS_TIMEZONE);
+  const date = fromZonedTime(`${opts.date}T00:00:00`, BUSINESS_TIMEZONE);
   const dayEnd = new Date(date.getTime() + 24 * 60 * 60 * 1000);
 
   // Block day-off if the doctor already has a confirmed appointment that day
@@ -341,7 +341,7 @@ export async function getAvailableSlotsForDate(opts: {
   // Create date range in IST timezone (slots are stored in IST)
   // date is YYYY-MM-DD, we need to create IST dates
   // Use start of day in IST and end of day in IST
-  const dayStart = zonedTimeToUtc(`${date}T00:00:00`, BUSINESS_TIMEZONE); // IST start of day
+  const dayStart = fromZonedTime(`${date}T00:00:00`, BUSINESS_TIMEZONE); // IST start of day
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000); // Next day start (exclusive)
 
   // console.log(" [SLOTS SERVICE] Date range (IST)
@@ -497,7 +497,7 @@ export async function getAdminSlots(opts: {
   // CASE 1: single date
   if (opts.date) {
     // Convert date string to UTC Date object representing start of day in IST
-    const dayStart = zonedTimeToUtc(`${opts.date}T00:00:00`, BUSINESS_TIMEZONE);
+    const dayStart = fromZonedTime(`${opts.date}T00:00:00`, BUSINESS_TIMEZONE);
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
 
     where.startAt = { gte: dayStart, lt: dayEnd };
@@ -506,11 +506,11 @@ export async function getAdminSlots(opts: {
   // CASE 2: range filter
   if (opts.startDate && opts.endDate) {
     // Convert date strings to UTC Date objects representing times in IST
-    const start = zonedTimeToUtc(
+    const start = fromZonedTime(
       `${opts.startDate}T00:00:00`,
       BUSINESS_TIMEZONE
     );
-    const end = zonedTimeToUtc(`${opts.endDate}T23:59:59`, BUSINESS_TIMEZONE);
+    const end = fromZonedTime(`${opts.endDate}T23:59:59`, BUSINESS_TIMEZONE);
 
     where.startAt = { gte: start, lte: end };
   }
@@ -576,8 +576,8 @@ export async function previewSlotsForRange(opts: {
   const { startDate, endDate, modes } = opts;
 
   // Convert date strings to UTC Date objects representing times in IST
-  const start = zonedTimeToUtc(`${startDate}T00:00:00`, BUSINESS_TIMEZONE);
-  const end = zonedTimeToUtc(`${endDate}T00:00:00`, BUSINESS_TIMEZONE);
+  const start = fromZonedTime(`${startDate}T00:00:00`, BUSINESS_TIMEZONE);
+  const end = fromZonedTime(`${endDate}T00:00:00`, BUSINESS_TIMEZONE);
 
   if (end < start) {
     throw new Error("endDate cannot be before startDate");
@@ -784,7 +784,7 @@ export async function previewSlotsForRange(opts: {
       day + 1
     ).padStart(2, "0")}`;
     cursor.setTime(
-      zonedTimeToUtc(`${nextDateStr}T00:00:00`, BUSINESS_TIMEZONE).getTime()
+      fromZonedTime(`${nextDateStr}T00:00:00`, BUSINESS_TIMEZONE).getTime()
     );
   }
 

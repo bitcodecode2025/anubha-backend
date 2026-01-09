@@ -5,19 +5,19 @@ import {
   APPOINTMENT_MODES,
   AppointmentModeType,
 } from "./slots.constants";
-import { formatInTimeZone, zonedTimeToUtc } from "date-fns-tz";
+import { formatInTimeZone, fromZonedTime } from "date-fns-tz";
 
 const BUSINESS_TIMEZONE = "Asia/Kolkata";
 
 /**
  * Build a JS Date in UTC from a YYYY-MM-DD + HH:mm (24h) in IST.
- * Uses zonedTimeToUtc to properly convert IST time to UTC Date object.
+ * Uses fromZonedTime to properly convert IST time to UTC Date object.
  */
 export function buildDateInIST(dateStr: string, timeStr: string): Date {
   // Create date string in IST: "2025-11-23T10:00:00"
   const istDateTimeString = `${dateStr}T${timeStr}:00`;
   // Convert IST time to UTC Date object
-  return zonedTimeToUtc(istDateTimeString, BUSINESS_TIMEZONE);
+  return fromZonedTime(istDateTimeString, BUSINESS_TIMEZONE);
 }
 
 /**
@@ -62,12 +62,12 @@ export function formatSlotLabel(startAt: Date, endAt: Date): string {
 /**
  * Utility to check if a JS Date (slot start) is already in the past.
  * Both date and Date.now() are UTC timestamps internally, so direct comparison works.
- * The slot date was created from IST time using zonedTimeToUtc, so this comparison
+ * The slot date was created from IST time using fromZonedTime, so this comparison
  * effectively checks if the slot time in IST has passed the current IST time.
  */
 export function isPastDate(date: Date) {
   // Compare UTC timestamps - both date and Date.now() are UTC internally
-  // Since slot dates are created from IST times using zonedTimeToUtc,
+  // Since slot dates are created from IST times using fromZonedTime,
   // this comparison correctly checks if the IST time has passed
   return date.getTime() < Date.now();
 }

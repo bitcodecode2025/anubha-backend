@@ -14,7 +14,7 @@ import {
   generateSignedUrl,
   deleteFromCloudinary,
 } from "../../util/cloudinary";
-import { zonedTimeToUtc } from "date-fns-tz";
+import { fromZonedTime } from "date-fns-tz";
 
 const BUSINESS_TIMEZONE = "Asia/Kolkata";
 
@@ -25,7 +25,7 @@ const BUSINESS_TIMEZONE = "Asia/Kolkata";
 function dateRangeFromQuery(dateStr?: string) {
   if (!dateStr) return undefined;
   // Convert date string to UTC Date object representing start of day in IST
-  const day = zonedTimeToUtc(`${dateStr}T00:00:00`, BUSINESS_TIMEZONE);
+  const day = fromZonedTime(`${dateStr}T00:00:00`, BUSINESS_TIMEZONE);
   const nextDay = new Date(day.getTime() + 24 * 60 * 60 * 1000);
   return { gte: day, lt: nextDay };
 }
