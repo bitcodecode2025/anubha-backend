@@ -149,7 +149,7 @@ app.use(multerErrorHandler);
  */
 function validatePaymentConfig() {
   // console.log("==========================================");
-  // console.log("🔍 Validating Razorpay Configuration...");
+  console.log("🔍 Validating Razorpay Configuration...");
   // console.log("==========================================");
   const razorpayValidation = validateRazorpayConfig();
 
@@ -436,6 +436,6 @@ process.on("unhandledRejection", (reason, promise) => {
 
 // Start the application
 startServer().catch((error) => {
-  console.error("Failed to start server:", error);
+  console.error("Failed to start server dkfjsdfjsjfjklj:", error);
   process.exit(1);
 });
