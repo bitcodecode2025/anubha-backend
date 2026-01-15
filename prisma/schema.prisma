@@ -65,6 +65,7 @@ model Admin {
   updatedAt         DateTime          @updatedAt
   email             String?              @unique
   password          String             
+  profilePictureUrl String?
   archivedAt        DateTime?
   isArchived        Boolean             @default(false)
   appointments      Appointment[]       @relation("DoctorAppointments")
