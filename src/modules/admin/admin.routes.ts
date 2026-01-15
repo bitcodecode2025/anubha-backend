@@ -8,6 +8,7 @@ import { adminLimiter, generalLimiter } from "../../middleware/rateLimit";
 import { validateFieldSizes } from "../../middleware/fieldSizeValidator";
 import { Role } from "@prisma/client";
 import multer from "multer";
+import imageUpload from "../../middleware/multerConfig";
 
 import {
   adminGetAppointments,
@@ -25,6 +26,12 @@ import {
   getDoctorNotes,
   deleteDoctorNoteAttachment,
 } from "./admin.controller";
+import {
+  uploadAdminProfilePicture,
+  getAdminProfilePicture,
+  updateAdminProfilePicture,
+  deleteAdminProfilePicture,
+} from "./admin-profile.controller";
 
 const adminRoutes = Router();
 
@@ -175,6 +182,58 @@ adminRoutes.delete(
   requireAuth,
   requireAdmin, // Database-verified admin check
   deleteDoctorNoteAttachment
+);
+
+// Admin Profile Picture Routes
+// POST /api/admin/profile/picture - Upload profile picture
+adminRoutes.post(
+  "/profile/picture",
+  attachUser,
+  requireAuth,
+  requireAdmin, // Database-verified admin check
+  imageUpload.single("profilePicture"), // Single file upload with field name "profilePicture"
+  validateFileContentMiddleware, // Validate file content matches MIME type
+  uploadAdminProfilePicture
+);
+
+// GET /api/admin/profile/picture - Get profile picture
+adminRoutes.get(
+  "/profile/picture",
+  attachUser,
+  requireAuth,
+  requireRole(Role.ADMIN), // Read-only, JWT check sufficient
+  getAdminProfilePicture
+);
+
+// PUT /api/admin/profile/picture - Update profile picture
+adminRoutes.put(
+  "/profile/picture",
+  attachUser,
+  requireAuth,
+  requireAdmin, // Database-verified admin check
+  imageUpload.single("profilePicture"), // Single file upload with field name "profilePicture"
+  validateFileContentMiddleware, // Validate file content matches MIME type
+  updateAdminProfilePicture
+);
+
+// PATCH /api/admin/profile/picture - Update profile picture (alternative)
+adminRoutes.patch(
+  "/profile/picture",
+  attachUser,
+  requireAuth,
+  requireAdmin, // Database-verified admin check
+  imageUpload.single("profilePicture"), // Single file upload with field name "profilePicture"
+  validateFileContentMiddleware, // Validate file content matches MIME type
+  updateAdminProfilePicture
+);
+
+// DELETE /api/admin/profile/picture - Delete profile picture
+adminRoutes.delete(
+  "/profile/picture",
+  attachUser,
+  requireAuth,
+  requireAdmin, // Database-verified admin check
+  deleteAdminProfilePicture
 );
 
 export default adminRoutes;

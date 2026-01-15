@@ -1,0 +1,9 @@
+-- AlterTable
+ALTER TABLE "Admin" ADD COLUMN     "profilePictureUrl" TEXT,
+ALTER COLUMN "phone" DROP NOT NULL,
+ALTER COLUMN "email" DROP NOT NULL;
+
+-- AlterTable
+ALTER TABLE "User" ALTER COLUMN "email" DROP NOT NULL,
+ALTER COLUMN "phone" DROP NOT NULL,
+ALTER COLUMN "password" DROP NOT NULL;
