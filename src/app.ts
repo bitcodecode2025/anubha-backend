@@ -27,6 +27,10 @@ import { env, validateRazorpayConfig } from "./config/env";
 const PORT = env.PORT;
 const app = express();
 
+// CRITICAL: Trust proxy for correct cookie parsing behind reverse proxy (PM2/nginx)
+// Without this, req.cookies may not be populated correctly in staging/production
+app.set("trust proxy", true);
+
 app.use(cookieParser());
 
 // CORS must be applied BEFORE other middleware
