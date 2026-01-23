@@ -16,6 +16,7 @@ import invoiceRoutes from "./modules/invoice/invoice.routes";
 import testimonialsRoutes from "./modules/testimonials/testimonials.routes";
 import prisma from "./database/prismaclient";
 import { startAppointmentReminderCron } from "./cron/reminder";
+import { startReminderWorker } from "./workers/reminder-worker";
 import { testMsg91Connection } from "./services/whatsapp.service";
 import { apiLogger } from "./middleware/apiLogger";
 import { env, validateRazorpayConfig } from "./config/env";
@@ -88,17 +89,25 @@ const getAllowedOrigins = (): (string | RegExp)[] => {
   return origins.length > 0 ? origins : ["http://localhost:3000"];
 };
 
-app.use(
-  cors({
-    origin: getAllowedOrigins(),
-    credentials: true, // REQUIRED: Allows cookies (auth_token)
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
-    exposedHeaders: ["Set-Cookie"],
-    preflightContinue: false,
-    optionsSuccessStatus: 204,
-  })
-);
+// CORS configuration for Doctor Notes section-aware saves
+// Must allow X-Section-Key custom header and handle OPTIONS preflight
+const corsOptions = {
+  origin: getAllowedOrigins(),
+  credentials: true, // REQUIRED: Allows cookies (auth_token)
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Cookie",
+    "X-Section-Key", // Required for Doctor Notes section-aware saves
+  ],
+  exposedHeaders: ["Set-Cookie"],
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
+};
+
+// Apply CORS middleware to all routes (handles OPTIONS preflight automatically)
+app.use(cors(corsOptions));
 
 // Request body size limit: 20MB total
 // Individual field sizes are validated by fieldSizeValidator middleware
@@ -148,9 +157,7 @@ app.use(multerErrorHandler);
  * Validate Razorpay configuration
  */
 function validatePaymentConfig() {
-  // console.log("==========================================");
-  console.log("🔍 Validating Razorpay Configuration...");
-  // console.log("==========================================");
+  // Razorpay validation log removed for production
   const razorpayValidation = validateRazorpayConfig();
 
   if (!razorpayValidation.isValid) {
@@ -347,8 +354,11 @@ async function startServer() {
     // Apply database health check middleware to all routes
     app.use(ensureDatabaseConnection);
 
-    // Start appointment reminder cron job
+    // Start appointment reminder cron job (lightweight - only enqueues jobs)
     startAppointmentReminderCron();
+
+    // Start reminder worker (processes jobs in background)
+    startReminderWorker();
 
     // Email service (Resend) is ready - no connection verification needed
 

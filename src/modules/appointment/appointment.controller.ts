@@ -1,9 +1,10 @@
 import { Request, Response } from "express";
 import prisma from "../../database/prismaclient";
 import { getSingleDoctorId } from "./appointment.service";
-import { AppointmentStatus, BookingProgress } from "@prisma/client";
+import { AppointmentStatus, BookingProgress, Prisma } from "@prisma/client";
 import { AppointmentMode } from "@prisma/client";
 import { validatePlanDetails } from "./plan-validation";
+import { archiveDuplicatePendingAppointments } from "../payment/payment.controller";
 
 export async function createAppointmentHandler(req: Request, res: Response) {
   try {
@@ -25,6 +26,7 @@ export async function createAppointmentHandler(req: Request, res: Response) {
     }
 
     const {
+      appointmentId, // NEW: Optional appointment ID to update existing appointment
       patientId,
       slotId,
       planSlug,
@@ -435,7 +437,7 @@ export async function createAppointmentHandler(req: Request, res: Response) {
 
     // SECURITY: Create appointment in transaction to ensure patient still exists
     // This prevents race condition where patient is deleted between validation and creation
-    let appointment;
+    let appointment: Awaited<ReturnType<typeof prisma.appointment.create>>;
     try {
       // Re-verify patient exists within transaction to prevent race condition
       const patientCheck = await prisma.patientDetials.findUnique({
@@ -452,6 +454,62 @@ export async function createAppointmentHandler(req: Request, res: Response) {
           message:
             "Patient not found or unauthorized. Please refresh and try again.",
         });
+      }
+
+      // NEW: If appointmentId is provided, update that appointment directly
+      if (appointmentId) {
+        const existingAppt = await prisma.appointment.findFirst({
+          where: {
+            id: appointmentId,
+            userId,
+            status: "PENDING",
+            isArchived: false,
+          },
+        });
+
+        if (existingAppt) {
+          // Determine booking progress
+          let progress: BookingProgress | null = null;
+          if (
+            bookingProgress &&
+            ["USER_DETAILS", "RECALL", "SLOT", "PAYMENT"].includes(
+              bookingProgress
+            )
+          ) {
+            progress = bookingProgress as BookingProgress;
+          } else {
+            if (slotId) {
+              progress = "SLOT";
+            } else if (patientId) {
+              progress = "USER_DETAILS";
+            }
+          }
+
+          // Update existing appointment
+          const updatedAppointment = await prisma.appointment.update({
+            where: { id: existingAppt.id },
+            data: {
+              bookingProgress: progress,
+              startAt: appointmentStartAt,
+              endAt: appointmentEndAt,
+              slotId: finalSlotId,
+              mode: appointmentMode as AppointmentMode,
+              planSlug,
+              planName,
+              planPrice: Number(planPrice),
+              planDuration,
+              planPackageName,
+            },
+          });
+
+          return res.status(200).json({
+            success: true,
+            message: "Appointment updated successfully",
+            data: updatedAppointment,
+            updated: true,
+          });
+        }
+        // If appointmentId provided but not found, continue with normal flow
       }
 
       // CRITICAL: Check if a CONFIRMED appointment already exists for this patient and plan
@@ -503,21 +561,17 @@ export async function createAppointmentHandler(req: Request, res: Response) {
 
       // CRITICAL: Check if a PENDING appointment already exists for this logical booking
       // This prevents duplicate PENDING appointments when the booking flow is called multiple times
-      // Matches by: userId, patientId, startAt (slotTime), planSlug, and optionally slotId
-      // This ensures we reuse the same appointment across all booking steps
-      const pendingWhere: any = {
+      // IMPROVED: Match by logical booking (userId + patientId + planSlug) without requiring exact startAt
+      // This allows users to change slots without creating new appointments
+      const pendingWhere: Prisma.AppointmentWhereInput = {
         userId,
         patientId,
-        startAt: appointmentStartAt, // Match by slot time/date
         planSlug,
         status: "PENDING",
         isArchived: false, // Only check non-archived appointments
+        // REMOVED: startAt match (too strict - user may change slot)
+        // REMOVED: slotId match (user may change slot)
       };
-
-      // If slotId is provided, also match by slotId for more precise duplicate detection
-      if (finalSlotId) {
-        pendingWhere.slotId = finalSlotId;
-      }
 
       const existingPendingAppointment = await prisma.appointment.findFirst({
         where: pendingWhere,
@@ -621,6 +675,25 @@ export async function createAppointmentHandler(req: Request, res: Response) {
           planPackageName,
         },
       });
+
+      // NEW: Archive old PENDING duplicates immediately after creating new appointment
+      // This prevents accumulation of abandoned bookings
+      try {
+        await prisma.$transaction(async (tx) => {
+          await archiveDuplicatePendingAppointments(tx, appointment.id, {
+            userId: appointment.userId,
+            patientId: appointment.patientId,
+            planSlug: appointment.planSlug,
+            startAt: appointment.startAt, // Optional - used for logging only
+          });
+        });
+      } catch (archiveError) {
+        // Log but don't fail - appointment creation succeeded
+        console.warn(
+          "[APPOINTMENT] Failed to archive duplicates (non-critical):",
+          archiveError
+        );
+      }
     } catch (dbError: any) {
       console.error(" [BACKEND] Database error creating appointment:", dbError);
       console.error(" [BACKEND] Database error details:", {
@@ -763,58 +836,87 @@ export async function adminUpdateAppointmentStatus(
 }
 
 export async function getMyAppointments(req: Request, res: Response) {
+  const startTime = Date.now(); // For performance monitoring
   try {
     if (!req.user) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const { includePending } = req.query; // Optional query param to include pending appointments
+    const { includePending, page = "1", limit = "20", sort } = req.query; // Optional query params
 
     // Build where clause
     const where: any = {
       userId: req.user.id,
       isArchived: false, // Exclude deleted appointments
+      isDeletedByAdmin: false, // Exclude appointments deleted by admin
     };
 
     if (includePending === "true") {
-      // Include both CONFIRMED and PENDING appointments
+      // Include CONFIRMED, PENDING, CANCELLED, and COMPLETED appointments
+      // This ensures all appointment statuses are visible to users
       where.status = {
-        in: ["CONFIRMED", "PENDING"],
+        in: ["CONFIRMED", "PENDING", "CANCELLED", "COMPLETED"],
       };
     } else {
-      // Only return CONFIRMED appointments for users (default behavior)
-      where.status = "CONFIRMED";
+      // Include CONFIRMED, CANCELLED, and COMPLETED appointments
+      // PENDING appointments are excluded by default, but CANCELLED and COMPLETED should always be visible
+      where.status = {
+        in: ["CONFIRMED", "CANCELLED", "COMPLETED"],
+      };
     }
 
-    const appointments = await prisma.appointment.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      include: {
-        patient: {
-          select: {
-            id: true,
-            name: true,
-            phone: true,
-            email: true,
+    // Pagination
+    const pageNum = Math.max(1, Number(page));
+    const lim = Math.min(200, Math.max(1, Number(limit)));
+    const skip = (pageNum - 1) * lim;
+
+    // Determine sort order: latest (desc) or oldest (asc), default to latest
+    const sortOrder = sort === "oldest" ? "asc" : "desc";
+
+    const [appointments, total] = await Promise.all([
+      prisma.appointment.findMany({
+        where,
+        skip,
+        take: lim,
+        orderBy: { startAt: sortOrder },
+        include: {
+          patient: {
+            select: {
+              id: true,
+              name: true,
+              phone: true,
+              email: true,
+            },
+          },
+          slot: {
+            select: {
+              id: true,
+              startAt: true,
+              endAt: true,
+              mode: true,
+            },
           },
         },
-        slot: {
-          select: {
-            id: true,
-            startAt: true,
-            endAt: true,
-            mode: true,
-          },
-        },
-      },
+      }),
+      prisma.appointment.count({ where }),
+    ]);
+
+    const durationMs = Date.now() - startTime;
+
+    // Log performance occasionally in development
+    if (process.env.NODE_ENV === "development" && Math.random() < 0.1) {
+      console.log(
+        `[USER APPOINTMENTS PERFORMANCE] Query took ${durationMs}ms. Total: ${total}, Page: ${pageNum}, Limit: ${lim}, includePending: ${includePending}`
+      );
+    }
+
+    return res.json({
+      success: true,
+      appointments,
+      total,
+      page: pageNum,
+      limit: lim,
     });
-
-    // console.log(
-    // `[USER APPOINTMENTS] Returning ${appointments.length} appointments for user ${req.user.id} (includePending: ${includePending})
-    // `
-    // );
-
-    return res.json({ success: true, appointments });
   } catch (err) {
     console.error("GET MY APPOINTMENTS ERROR:", err);
     return res.status(500).json({
@@ -826,12 +928,13 @@ export async function getMyAppointments(req: Request, res: Response) {
 
 // New endpoint: Get pending appointments specifically
 export async function getPendingAppointments(req: Request, res: Response) {
+  const startTime = Date.now(); // For performance monitoring
   try {
     if (!req.user) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const { patientId } = req.query; // Optional patientId filter
+    const { patientId, page = "1", limit = "10" } = req.query; // Optional query params
 
     const where: any = {
       userId: req.user.id,
@@ -844,42 +947,55 @@ export async function getPendingAppointments(req: Request, res: Response) {
       where.patientId = patientId;
     }
 
-    const appointments = await prisma.appointment.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      include: {
-        patient: {
-          select: {
-            id: true,
-            name: true,
-            phone: true,
-            email: true,
+    // Pagination
+    const pageNum = Math.max(1, Number(page));
+    const lim = Math.min(200, Math.max(1, Number(limit)));
+    const skip = (pageNum - 1) * lim;
+
+    const [appointments, total] = await Promise.all([
+      prisma.appointment.findMany({
+        where,
+        skip,
+        take: lim,
+        orderBy: { createdAt: "desc" },
+        include: {
+          patient: {
+            select: {
+              id: true,
+              name: true,
+              phone: true,
+              email: true,
+            },
+          },
+          slot: {
+            select: {
+              id: true,
+              startAt: true,
+              endAt: true,
+              mode: true,
+            },
           },
         },
-        slot: {
-          select: {
-            id: true,
-            startAt: true,
-            endAt: true,
-            mode: true,
-          },
-        },
-      },
-    });
+      }),
+      prisma.appointment.count({ where }),
+    ]);
 
-    // console.log(
-    // `[PENDING APPOINTMENTS] Returning ${appointments.length} pending appointments for user ${req.user.id}`
-    // );
-    // Log each appointment's booking progress for debugging
-    appointments.forEach((apt: any) => {
-      // console.log(
-      // `[PENDING APPOINTMENTS] Appointment ${apt.id}: bookingProgress = ${
-      // apt.bookingProgress || "null"
-      // }, slotId = ${apt.slotId || "null"}`
-      // );
-    });
+    const durationMs = Date.now() - startTime;
 
-    return res.json({ success: true, appointments });
+    // Log performance occasionally in development
+    if (process.env.NODE_ENV === "development" && Math.random() < 0.1) {
+      console.log(
+        `[PENDING APPOINTMENTS PERFORMANCE] Query took ${durationMs}ms. Total: ${total}, Page: ${pageNum}, Limit: ${lim}`
+      );
+    }
+
+    return res.json({
+      success: true,
+      appointments,
+      total,
+      page: pageNum,
+      limit: lim,
+    });
   } catch (err) {
     console.error("GET PENDING APPOINTMENTS ERROR:", err);
     return res.status(500).json({
@@ -964,19 +1080,48 @@ export async function getUserAppointmentDetails(req: Request, res: Response) {
       where: { id },
       include: {
         patient: {
-          include: {
-            files: true,
-            recalls: {
-              include: {
-                entries: true,
-              },
-              orderBy: { createdAt: "desc" },
-            },
-          },
+          // ❌ REMOVED recalls from here - will fetch separately by appointmentId
         },
         slot: true,
       },
     });
+
+    // ✅ Fetch appointment-scoped recalls separately (like Files)
+    const appointmentRecalls = await prisma.recall.findMany({
+      where: {
+        appointmentId: id, // ✅ Filter by appointmentId
+        isArchived: false,
+      },
+      include: {
+        entries: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    // Reports are scoped to the appointment (not patient) to prevent cross-appointment sharing.
+    // We fetch them explicitly to avoid relying on Prisma relation typings during build-time.
+    // NOTE: Using raw SQL query as workaround until Prisma client is regenerated with File.appointmentId support.
+    // TODO: After running `npx prisma generate`, replace with: prisma.file.findMany({ where: { appointmentId: id, isArchived: false } })
+    const appointmentFiles = await prisma.$queryRaw<Array<{
+      id: string;
+      url: string;
+      fileName: string;
+      mimeType: string;
+      createdAt: Date;
+      provider: string;
+      sizeInBytes: number;
+      updatedAt: Date;
+      patientId: string | null;
+      appointmentId: string | null;
+      publicId: string;
+      archivedAt: Date | null;
+      isArchived: boolean;
+    }>>`
+      SELECT * FROM "File"
+      WHERE "appointmentId"::text = ${id}::text
+        AND "isArchived" = false
+      ORDER BY "createdAt" ASC
+    `;
 
     // Exclude archived appointments from user view
     if (appointment && appointment.isArchived) {
@@ -994,7 +1139,17 @@ export async function getUserAppointmentDetails(req: Request, res: Response) {
       });
     }
 
-    return res.json({ success: true, appointment });
+    return res.json({
+      success: true,
+      appointment: {
+        ...(appointment as any),
+        patient: {
+          ...(appointment as any).patient,
+          recalls: appointmentRecalls, // ✅ Only appointment-specific recalls
+        },
+        files: appointmentFiles,
+      },
+    });
   } catch (err) {
     console.error("GET USER APPOINTMENT DETAILS ERROR:", err);
     return res.status(500).json({
