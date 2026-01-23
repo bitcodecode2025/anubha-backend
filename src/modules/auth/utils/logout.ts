@@ -2,20 +2,35 @@ import { Request, Response } from "express";
 
 /**
  * Helper function to get consistent cookie options for clearing cookies
- * Must match the options used when setting the cookie
+ * Must match EXACTLY the options used when setting the cookie in auth.controller.ts
  */
 function getAuthTokenCookieOptions() {
+  const isProduction = process.env.NODE_ENV === "production";
+  const isStaging = process.env.NODE_ENV !== "production" && 
+    (process.env.FRONTEND_URL?.includes("staging") || 
+     process.env.CORS_ORIGINS?.includes("staging") ||
+     process.env.COOKIE_DOMAIN?.includes("staging"));
+
   const options: any = {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax" as const, // Must match the setting cookie options
     path: "/", // Must match the setting cookie path
   };
 
-  // Set domain in production for proper cookie clearing
-  // In development, omit domain to allow localhost
-  if (process.env.NODE_ENV === "production" && process.env.COOKIE_DOMAIN) {
-    options.domain = process.env.COOKIE_DOMAIN;
+  if (isProduction) {
+    // Production settings: must match auth.controller.ts exactly
+    options.secure = true;
+    options.sameSite = "none" as const;
+    options.domain = process.env.COOKIE_DOMAIN || ".anubhanutrition.in";
+  } else if (isStaging) {
+    // Staging settings: must match auth.controller.ts exactly
+    options.secure = true;
+    options.sameSite = "none" as const;
+    options.domain = process.env.COOKIE_DOMAIN || ".staging.anubhanutrition.in";
+  } else {
+    // Dev settings: must match auth.controller.ts exactly
+    options.secure = false;
+    options.sameSite = "lax" as const;
+    // No domain set for localhost
   }
 
   return options;

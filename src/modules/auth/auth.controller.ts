@@ -7,10 +7,14 @@ import prisma from "../../database/prismaclient";
  * Helper function to get consistent cookie options
  * Ensures all auth_token cookies are set with the same configuration
  * Environment-aware: production uses secure cookies with cross-site support,
- * staging/dev uses relaxed settings for local development
+ * staging uses staging domain, dev uses relaxed settings for localhost
  */
 function getAuthTokenCookieOptions() {
   const isProduction = process.env.NODE_ENV === "production";
+  const isStaging = process.env.NODE_ENV !== "production" && 
+    (process.env.FRONTEND_URL?.includes("staging") || 
+     process.env.CORS_ORIGINS?.includes("staging") ||
+     process.env.COOKIE_DOMAIN?.includes("staging"));
 
   const options: any = {
     httpOnly: true,
@@ -22,12 +26,18 @@ function getAuthTokenCookieOptions() {
     // Production settings: secure, cross-site, with domain
     options.secure = true;
     options.sameSite = "none" as const;
-    options.domain = ".anubhanutrition.in";
+    options.domain = process.env.COOKIE_DOMAIN || ".anubhanutrition.in";
+  } else if (isStaging) {
+    // Staging settings: secure, cross-site, with staging domain
+    // Staging uses HTTPS, so secure=true is required
+    options.secure = true;
+    options.sameSite = "none" as const;
+    options.domain = process.env.COOKIE_DOMAIN || ".staging.anubhanutrition.in";
   } else {
-    // Staging/Dev settings: relaxed for local development
+    // Dev settings: relaxed for localhost development
     options.secure = false;
     options.sameSite = "lax" as const;
-    // No domain set for localhost/staging
+    // No domain set for localhost
   }
 
   return options;
