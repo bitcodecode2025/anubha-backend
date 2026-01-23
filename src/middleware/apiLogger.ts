@@ -18,11 +18,9 @@ export function apiLogger(req: Request, res: Response, next: NextFunction) {
     return next();
   }
 
-  // Only log in development or when ENABLE_API_LOGGER=true
-  const enableLogger =
-    process.env.ENABLE_API_LOGGER === "true" ||
-    process.env.NODE_ENV === "development";
-  if (!enableLogger) {
+  // Only log in non-production environments
+  // In production, this middleware is completely silent to avoid log spam
+  if (process.env.NODE_ENV === "production") {
     return next();
   }
 

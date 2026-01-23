@@ -236,34 +236,10 @@ const doctorNotesUpload = multer({
 
 adminRoutes.post(
   "/doctor-notes",
-  (req, res, next) => {
-    console.log("[ROUTE] POST /api/admin/doctor-notes - Request received");
-    next();
-  },
-  // attachUser is already applied globally in app.ts, no need to call it again
-  (req, res, next) => {
-    console.log(
-      "[ROUTE] POST /api/admin/doctor-notes - User:",
-      req.user ? { id: req.user.id, role: req.user.role } : "null"
-    );
-    next();
-  },
+  // Debug route logs removed for production
   requireAuth,
   requireAdmin, // Database-verified admin check
-  (req, res, next) => {
-    console.log(
-      "[ROUTE] POST /api/admin/doctor-notes - After requireAdmin, entering multer"
-    );
-    next();
-  },
   doctorNotesUpload, // Handle multiple file types (PDFs and images)
-  (req, res, next) => {
-    console.log(
-      "[ROUTE] POST /api/admin/doctor-notes - After multer, files:",
-      req.files ? Object.keys(req.files) : "none"
-    );
-    next();
-  },
   validateFileContentMiddleware, // Validate file content matches MIME type
   validateFieldSizes(), // Validate field sizes (for JSON data in body)
   saveDoctorNotes
@@ -271,20 +247,7 @@ adminRoutes.post(
 
 adminRoutes.get(
   "/doctor-notes/:appointmentId",
-  (req, res, next) => {
-    console.log(
-      "[ROUTE] GET /api/admin/doctor-notes/:appointmentId - Request received"
-    );
-    next();
-  },
-  // attachUser is already applied globally in app.ts, no need to call it again
-  (req, res, next) => {
-    console.log(
-      "[ROUTE] GET /api/admin/doctor-notes/:appointmentId - User:",
-      req.user ? { id: req.user.id, role: req.user.role } : "null"
-    );
-    next();
-  },
+  // Debug route logs removed for production
   requireAuth,
   requireRole(Role.ADMIN), // Read-only, JWT check sufficient
   getDoctorNotes

@@ -920,14 +920,7 @@ export async function saveDoctorSession(req: Request, res: Response) {
  * PATCH /api/admin/doctor-notes/:appointmentId (partial update)
  */
 export async function saveDoctorNotes(req: Request, res: Response) {
-  console.log("==========================================");
-  console.log("Doctor Notes upload endpoint hit");
-  console.log(`Method: ${req.method}`);
-  console.log(`Path: ${req.path}`);
-  console.log(`Original URL: ${req.originalUrl}`);
-  console.log(`Has Files: ${!!req.files}`);
-  console.log(`Files Object:`, req.files ? Object.keys(req.files) : "none");
-  console.log("==========================================");
+  // Debug logs removed for production
   const isPatch = req.method === "PATCH";
   const startTime = Date.now();
 
@@ -1062,17 +1055,7 @@ export async function saveDoctorNotes(req: Request, res: Response) {
           });
         }
 
-        console.log("[BACKEND] File upload summary:", {
-          dietCharts: files.length,
-          preImages: preImages.length,
-          postImages: postImages.length,
-          medicalReports: medicalReports.length,
-          totalFiles:
-            files.length +
-            preImages.length +
-            postImages.length +
-            medicalReports.length,
-        });
+        // File upload summary log removed for production
 
         // Process each file
         for (let i = 0; i < files.length; i++) {
@@ -1136,16 +1119,8 @@ export async function saveDoctorNotes(req: Request, res: Response) {
         }
 
         // Process pre-consultation images
-        console.log(
-          `[BACKEND] Processing ${preImages.length} pre-consultation image(s)`
-        );
         for (let i = 0; i < preImages.length; i++) {
           const file = preImages[i];
-          console.log(
-            `[BACKEND] Uploading pre-image ${i + 1}/${preImages.length}: ${
-              file.originalname
-            }`
-          );
           try {
             const fileExtension =
               file.originalname.split(".").pop()?.toLowerCase() || "jpg";
@@ -1180,11 +1155,6 @@ export async function saveDoctorNotes(req: Request, res: Response) {
               mimeType: file.mimetype,
               sizeInBytes: file.size,
             });
-            console.log(
-              `[BACKEND] Successfully uploaded pre-image ${i + 1}: ${
-                uploadResult.key
-              }`
-            );
           } catch (uploadError: any) {
             console.error(
               `[BACKEND] Pre-image ${i + 1} upload error:`,
@@ -1200,16 +1170,8 @@ export async function saveDoctorNotes(req: Request, res: Response) {
         }
 
         // Process post-consultation images
-        console.log(
-          `[BACKEND] Processing ${postImages.length} post-consultation image(s)`
-        );
         for (let i = 0; i < postImages.length; i++) {
           const file = postImages[i];
-          console.log(
-            `[BACKEND] Uploading post-image ${i + 1}/${postImages.length}: ${
-              file.originalname
-            }`
-          );
           try {
             const fileExtension =
               file.originalname.split(".").pop()?.toLowerCase() || "jpg";
@@ -1244,11 +1206,6 @@ export async function saveDoctorNotes(req: Request, res: Response) {
               mimeType: file.mimetype,
               sizeInBytes: file.size,
             });
-            console.log(
-              `[BACKEND] Successfully uploaded post-image ${i + 1}: ${
-                uploadResult.key
-              }`
-            );
           } catch (uploadError: any) {
             console.error(
               `[BACKEND] Post-image ${i + 1} upload error:`,
@@ -2178,49 +2135,7 @@ export async function sendDoctorNotesEmailController(
       });
     }
 
-    // Log all attachments before filtering for debugging
-    console.log("==========================================");
-    console.log("[EMAIL] DATABASE ATTACHMENTS INSPECTION");
-    console.log("==========================================");
-    console.log(
-      `Total attachments in database: ${appointment.doctorNotes.attachments.length}`
-    );
-
-    if (appointment.doctorNotes.attachments.length === 0) {
-      console.log("[EMAIL] ⚠️ NO ATTACHMENTS FOUND IN DATABASE");
-      console.log("==========================================");
-    } else {
-      console.log("\n[EMAIL] Attachment Details from Database:");
-      appointment.doctorNotes.attachments.forEach((att, index) => {
-        console.log(`\n--- Attachment ${index + 1} ---`);
-        console.log(`  ID: ${att.id}`);
-        console.log(`  fileName: ${att.fileName}`);
-        console.log(`  mimeType: ${att.mimeType || "NULL"}`);
-        console.log(`  filePath: ${att.filePath || "NULL"}`);
-        console.log(
-          `  fileCategory: ${(att as any).fileCategory || "NULL"} ⬅️ CHECK THIS`
-        );
-        console.log(
-          `  provider: ${(att as any).provider || "NULL"} ⬅️ CHECK THIS`
-        );
-        console.log(`  sizeInBytes: ${att.sizeInBytes || "NULL"}`);
-        console.log(
-          `  isArchived: ${
-            (att as any).isArchived !== undefined
-              ? (att as any).isArchived
-              : "unknown"
-          }`
-        );
-
-        // Explicit check for PDF indicators
-        const isPDF =
-          att.mimeType === "application/pdf" ||
-          (att.filePath && att.filePath.includes("/pdf/")) ||
-          (att.fileName && att.fileName.toLowerCase().endsWith(".pdf"));
-        console.log(`  ⚠️  Is PDF? ${isPDF ? "YES" : "NO"}`);
-      });
-      console.log("\n==========================================");
-    }
+    // Debug logs removed for production
 
     // Get PDF attachments that are stored in R2 (S3 provider)
     // Email service only supports R2 downloads, so we must filter by provider === S3
@@ -2234,68 +2149,29 @@ export async function sendDoctorNotesEmailController(
       // Only process attachments stored in R2 (S3 provider)
       // Email service can only download from R2, not Cloudinary
       if (provider !== "S3") {
-        console.log(
-          `[EMAIL] ✗ Skipped (not R2): ${att.fileName} (provider: ${
-            provider || "unknown"
-          })`
-        );
         return false;
       }
 
       // PRIMARY: Check mimeType (most reliable indicator)
       if (att.mimeType === "application/pdf") {
-        console.log(
-          `[EMAIL] ✓ PDF detected by mimeType: ${att.fileName} (provider: S3)`
-        );
         return true;
       }
 
       // SECONDARY: Check filePath pattern for R2-stored PDFs
       // R2 PDFs are stored with path: "doctor-notes/pdf/{appointmentId}/{uuid}.pdf"
       if (att.filePath && att.filePath.includes("/pdf/")) {
-        console.log(
-          `[EMAIL] ✓ PDF detected by filePath pattern: ${att.fileName} (provider: S3)`
-        );
         return true;
       }
 
       // TERTIARY: Check file extension as fallback (for edge cases)
       if (att.fileName && att.fileName.toLowerCase().endsWith(".pdf")) {
-        console.log(
-          `[EMAIL] ✓ PDF detected by file extension: ${att.fileName} (provider: S3)`
-        );
         return true;
       }
 
-      // Log why attachment was excluded (for debugging)
-      console.log(
-        `[EMAIL] ✗ Not a PDF: ${att.fileName} (mimeType: ${
-          att.mimeType || "null"
-        }, filePath: ${att.filePath ? "present" : "null"})`
-      );
       return false;
     });
 
-    console.log("\n[EMAIL] PDF FILTERING RESULTS:");
-    console.log("==========================================");
-    console.log(`PDFs found: ${attachments.length}`);
-    if (attachments.length > 0) {
-      console.log("\n[EMAIL] PDFs that will be sent:");
-      attachments.forEach((att, index) => {
-        console.log(`  ${index + 1}. ${att.fileName}`);
-        console.log(`     - filePath: ${att.filePath}`);
-        console.log(`     - provider: ${(att as any).provider}`);
-        console.log(`     - mimeType: ${att.mimeType}`);
-      });
-    } else {
-      console.log("\n[EMAIL] ⚠️ NO PDFs FOUND AFTER FILTERING");
-      console.log("\n[EMAIL] Filtering criteria:");
-      console.log("  1. provider === 'S3' (R2 storage)");
-      console.log("  2. mimeType === 'application/pdf' OR");
-      console.log("  3. filePath includes '/pdf/' OR");
-      console.log("  4. fileName ends with '.pdf'");
-    }
-    console.log("==========================================");
+    // PDF filtering results log removed for production
 
     if (attachments.length === 0) {
       return res.status(400).json({

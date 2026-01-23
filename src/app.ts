@@ -157,9 +157,7 @@ app.use(multerErrorHandler);
  * Validate Razorpay configuration
  */
 function validatePaymentConfig() {
-  // console.log("==========================================");
-  console.log("🔍 Validating Razorpay Configuration...");
-  // console.log("==========================================");
+  // Razorpay validation log removed for production
   const razorpayValidation = validateRazorpayConfig();
 
   if (!razorpayValidation.isValid) {

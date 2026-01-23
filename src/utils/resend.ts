@@ -20,7 +20,9 @@ if (!RESEND_API_KEY) {
   );
   console.warn("[RESEND] Email sending will fail if RESEND_API_KEY is not set");
 } else {
-  console.log("[RESEND] ✅ Resend API key configured");
+  if (process.env.NODE_ENV === "development") {
+    console.log("[RESEND] ✅ Resend API key configured");
+  }
 }
 
 // Create Resend client instance

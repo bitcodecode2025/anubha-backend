@@ -437,7 +437,7 @@ export async function createAppointmentHandler(req: Request, res: Response) {
 
     // SECURITY: Create appointment in transaction to ensure patient still exists
     // This prevents race condition where patient is deleted between validation and creation
-    let appointment;
+    let appointment: Awaited<ReturnType<typeof prisma.appointment.create>>;
     try {
       // Re-verify patient exists within transaction to prevent race condition
       const patientCheck = await prisma.patientDetials.findUnique({

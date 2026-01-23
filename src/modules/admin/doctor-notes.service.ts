@@ -430,17 +430,7 @@ export async function syncDoctorNoteAttachments(
         },
       });
 
-      // Debug logging for medical reports
-      if (uploadedFile.filePath.includes("/reports/")) {
-        console.log("[BACKEND] Medical report attachment created:", {
-          id: newAttachment.id,
-          fileName: newAttachment.fileName,
-          filePath: newAttachment.filePath,
-          fileCategory: newAttachment.fileCategory,
-          section: newAttachment.section,
-          provider: newAttachment.provider,
-        });
-      }
+      // Debug logging removed for production
     }
   }
 }
